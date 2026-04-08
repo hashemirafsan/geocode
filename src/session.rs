@@ -42,10 +42,22 @@ impl SessionStore {
         serde_json::from_str(&content).map_err(|err| ExecutionError::Session(err.to_string()))
     }
 
+    pub fn clear(&self) -> Result<(), ExecutionError> {
+        if self.path.exists() {
+            fs::remove_file(&self.path).map_err(|err| ExecutionError::Session(err.to_string()))?;
+        }
+
+        Ok(())
+    }
+
     pub fn save(&self, session: &SessionState) -> Result<(), ExecutionError> {
         let content = serde_json::to_string_pretty(session)
             .map_err(|err| ExecutionError::Session(err.to_string()))?;
 
         fs::write(&self.path, content).map_err(|err| ExecutionError::Session(err.to_string()))
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.path
     }
 }

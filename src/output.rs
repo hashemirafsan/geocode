@@ -29,8 +29,171 @@ fn render_text(response: &CommandResponse) -> String {
         "inspect" => render_inspect(response),
         "mean" => render_mean(response),
         "compare" => render_compare(response),
+        "ask" => render_ask(response),
+        "provider_list" => render_provider_list(response),
+        "provider_status" => render_provider_status(response),
+        "provider_set_api_key" => render_provider_set_api_key(response),
+        "session_show" => render_session_show(response),
+        "session_clear" => render_session_clear(response),
         _ => response.summary.clone(),
     }
+}
+
+fn render_provider_set_api_key(response: &CommandResponse) -> String {
+    let provider = display_provider_name(
+        response.details["provider_name"]
+            .as_str()
+            .unwrap_or("unknown"),
+    );
+    let path = response.details["path"].as_str().unwrap_or("<unknown>");
+    let configured = response.details["provider"]["config"]["configured"]
+        .as_bool()
+        .unwrap_or(false);
+    let source = response.details["provider"]["credential_source"]
+        .as_str()
+        .unwrap_or("unknown");
+
+    format!(
+        "Stored API key\nProvider: {provider}\nConfig Path: {path}\nConfigured: {configured}\nCredential Source: {source}"
+    )
+}
+
+fn render_provider_list(response: &CommandResponse) -> String {
+    let providers = response.details["providers"]
+        .as_array()
+        .map(|providers| {
+            providers
+                .iter()
+                .map(|provider| {
+                    let name =
+                        display_provider_name(provider["provider"].as_str().unwrap_or("unknown"));
+                    let auth_method = provider["auth_method"].as_str().unwrap_or("unknown");
+                    let configured = provider["configured"].as_bool().unwrap_or(false);
+                    format!("- {name} ({auth_method}, configured={configured})")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+
+    format!("Supported Providers:\n{providers}")
+}
+
+fn render_ask(response: &CommandResponse) -> String {
+    let provider = display_provider_name(
+        response.details["provider"]["config"]["provider"]
+            .as_str()
+            .unwrap_or("unknown"),
+    );
+    let intent = response.details["plan"]["intent"]
+        .as_str()
+        .unwrap_or("unknown");
+    let variable = response.details["plan"]["variable"]
+        .as_str()
+        .unwrap_or("<none>");
+    let requires_clarification = response.details["plan"]["requires_clarification"]
+        .as_bool()
+        .unwrap_or(false);
+    let tools = response.details["plan"]["tool_ids"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let selected_files = response.details["request"]["selected_files"]
+        .as_array()
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|file| file.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+
+    let mut lines = vec![format!("Provider: {provider}"), format!("Intent: {intent}")];
+
+    if !selected_files.is_empty() {
+        lines.push(format!("Selected Files: {selected_files}"));
+    }
+
+    if intent != "unknown" {
+        lines.push(format!("Variable: {variable}"));
+        lines.push(format!("Planned Tools: {tools}"));
+    }
+
+    lines.push(format!("Needs Clarification: {requires_clarification}"));
+
+    if let Some(question) = response.details["plan"]["clarification_question"].as_str() {
+        lines.push(format!("Clarification: {question}"));
+    }
+
+    lines.join("\n")
+}
+
+fn render_provider_status(response: &CommandResponse) -> String {
+    let provider = display_provider_name(
+        response.details["config"]["provider"]
+            .as_str()
+            .unwrap_or("unknown"),
+    );
+    let auth_method = response.details["config"]["auth_method"]
+        .as_str()
+        .unwrap_or("unknown");
+    let configured = response.details["config"]["configured"]
+        .as_bool()
+        .unwrap_or(false);
+    let model = response.details["config"]["model"]
+        .as_str()
+        .unwrap_or("<unknown>");
+    let base_url = response.details["config"]["base_url"]
+        .as_str()
+        .unwrap_or("<unknown>");
+    let env_var = response.details["api_key_env_var"]
+        .as_str()
+        .unwrap_or("OPENAI_API_KEY");
+    let config_path = response.details["config_path"]
+        .as_str()
+        .unwrap_or("<unknown>");
+    let credential_source = response.details["credential_source"]
+        .as_str()
+        .unwrap_or("unknown");
+
+    format!(
+        "Provider: {provider}\nAuth Method: {auth_method}\nConfigured: {configured}\nModel: {model}\nBase URL: {base_url}\nAPI Key Env Var: {env_var}\nConfig Path: {config_path}\nCredential Source: {credential_source}"
+    )
+}
+
+fn display_provider_name(name: &str) -> &str {
+    match name {
+        "open_ai" => "openai",
+        other => other,
+    }
+}
+
+fn render_session_show(response: &CommandResponse) -> String {
+    let path = response.details["path"].as_str().unwrap_or("<unknown>");
+    let session = &response.details["session"];
+    let session_id = session["session_id"].as_str().unwrap_or("<none>");
+    let workspace_path = session["workspace_path"].as_str().unwrap_or("<none>");
+    let last_variable = session["last_variable"].as_str().unwrap_or("<none>");
+    let alias_count = session["aliases"]
+        .as_array()
+        .map(|aliases| aliases.len())
+        .unwrap_or_default();
+
+    format!(
+        "Session File: {path}\nSession ID: {session_id}\nWorkspace Path: {workspace_path}\nLast Variable: {last_variable}\nAliases: {alias_count}"
+    )
+}
+
+fn render_session_clear(response: &CommandResponse) -> String {
+    let path = response.details["path"].as_str().unwrap_or("<unknown>");
+    format!("Session cleared\nSession File: {path}")
 }
 
 fn render_compare(response: &CommandResponse) -> String {

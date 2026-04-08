@@ -55,6 +55,12 @@ pub enum ExecutionError {
     InvalidInput(String),
     #[error("invalid compare request: {0}")]
     InvalidCompare(String),
+    #[error("provider not configured: {0}")]
+    ProviderNotConfigured(String),
+    #[error("provider error: {0}")]
+    Provider(String),
+    #[error("agent error: {0}")]
+    Agent(String),
     #[error("command failed: {0}")]
     Command(String),
     #[error("parse error: {0}")]

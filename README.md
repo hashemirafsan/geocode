@@ -8,6 +8,39 @@ Current focus:
 - machine-readable JSON output
 - minimal session foundation
 
+## Provider Auth Strategy
+Current provider implementation:
+- OpenAI is API key based
+- expected env var: `OPENAI_API_KEY`
+- CLI-based key storage is also supported
+
+Planned provider architecture:
+- provider abstraction must support both API key and OAuth-based providers
+- GeoCode should only promise OAuth where the target provider exposes a product-safe OAuth flow
+- OpenAI should be treated as API-key first in the current product shape
+
+This distinction is important:
+- provider abstraction supports OAuth-capable providers later
+- current OpenAI support is not an OAuth flow
+
+### Set API Key From CLI
+Recommended:
+
+```bash
+printf '%s' "$OPENAI_API_KEY" | geocode provider set-api-key openai --stdin
+```
+
+Also supported:
+
+```bash
+geocode provider set-api-key openai --api-key "sk-..."
+```
+
+Notes:
+- `--stdin` is safer than passing the key directly on the command line
+- stored provider config is written outside the repo under `~/.config/geocode/openai.json`
+- `OPENAI_API_KEY` still overrides stored config when set
+
 ## Status
 Implemented core `v0.1` commands:
 - `inspect`
@@ -92,6 +125,23 @@ Rules:
 - no alignment, reprojection, or resampling in `v0.1`
 - difference is always `mean_b - mean_a`
 
+### Provider Status
+Inspect the current provider configuration.
+
+```bash
+geocode provider list
+geocode provider status
+geocode --json provider status
+```
+
+Current behavior:
+- lists supported providers explicitly
+- reports provider name
+- reports auth method
+- reports configured state
+- reports model and base URL
+- reports config path and credential source
+
 ## JSON Output
 All core commands support `--json`.
 
@@ -111,6 +161,23 @@ GeoCode returns explicit CLI errors for cases such as:
 - missing NetCDF `--var`
 - invalid NetCDF variables
 - mixed-type compare requests
+- unconfigured provider usage for `ask`
+
+## Agent Entry
+Current agent entrypoint:
+
+```bash
+geocode ask "show all variables in base.nc"
+geocode ask --file base.nc "show all variables in this file"
+geocode ask --file base.nc --file scenario.nc "compare these datasets"
+```
+
+Current behavior:
+- `ask` supports explicit file selection via repeatable `--file`
+- if `OPENAI_API_KEY` is missing, GeoCode fails cleanly with setup guidance
+- a stored CLI-configured key also enables `ask`
+- if configured, GeoCode attempts a planner-only OpenAI request and returns a structured plan
+- execution still remains outside the LLM
 
 ## Tests
 Run the full test suite:

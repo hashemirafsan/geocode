@@ -296,6 +296,12 @@ Persist only:
 - API key flow first
 - graceful disable when unconfigured
 
+### Auth model clarification
+- GeoCode's provider abstraction should support both API-key and OAuth-capable providers.
+- OpenAI should be treated as API-key first in the current product shape.
+- OAuth should be added only for providers that expose a product-safe OAuth flow that fits a local CLI workflow.
+- Do not promise OAuth for OpenAI unless there is a verified product path and token lifecycle design for it.
+
 ### Agent mode rule
 - agent mode should reuse the same execution layer as direct commands
 - agent mode should start narrow and optional
@@ -698,23 +704,53 @@ Definition of done:
 ### Epic 10: OpenAI Provider
 #### `PROVIDER-001` Add provider config model
 Definition of done:
-- config model exists for provider name, model, API key presence, and optional base URL
+- config model exists for provider name, auth method, model, API key presence, and optional base URL
 
 #### `PROVIDER-002` Add OpenAI planner client
 Definition of done:
 - minimal OpenAI integration exists for planner requests
 - numeric execution remains outside the LLM
+- OpenAI auth path is explicitly API-key based
 
 #### `PROVIDER-003` Add provider status command
 Definition of done:
 - CLI supports provider or auth status inspection
 - user can determine whether OpenAI is configured
+- auth method is visible in the status output
+
+#### `PROVIDER-003A` Add CLI-based API key configuration
+Definition of done:
+- CLI supports setting an OpenAI API key without requiring manual environment setup
+- stored provider config lives outside the repo in a user-scoped config path
+- status output shows whether credentials came from env or stored config
 
 #### `PROVIDER-004` Add graceful unconfigured behavior
 Definition of done:
 - agent commands fail cleanly when OpenAI is not configured
 - direct command mode remains unaffected
 - output includes setup guidance
+
+### Epic 10B: Auth Abstraction and OAuth-Capable Providers
+#### `AUTH-001` Define provider auth method abstraction
+Definition of done:
+- provider layer distinguishes API-key and OAuth-based auth methods explicitly
+- auth method selection is part of provider configuration
+
+#### `AUTH-002` Define credential storage boundary
+Definition of done:
+- API keys and OAuth tokens have a shared storage abstraction
+- storage strategy is documented before multiple auth flows are implemented
+
+#### `AUTH-003` Define OAuth callback and token lifecycle design
+Definition of done:
+- local CLI callback flow is documented
+- refresh, expiry, and logout behavior are defined
+- no implementation begins before lifecycle rules are explicit
+
+#### `AUTH-004` Add first OAuth-capable provider only after provider fit is verified
+Definition of done:
+- OAuth implementation targets a provider that actually supports the intended product workflow
+- OpenAI is not forced into an unsupported OAuth promise
 
 ### Epic 11: First Agent Behavior
 #### `AGENT-004` Map inspect-style natural language to inspect execution
@@ -893,6 +929,7 @@ Definition of done:
 - `PROVIDER-001` to `PROVIDER-004`
 
 ### Sprint 8
+- `AUTH-001` to `AUTH-004`
 - `MEMORY-001` to `MEMORY-008`
 
 ### Sprint 9
