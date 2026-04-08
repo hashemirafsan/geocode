@@ -1,0 +1,6 @@
+/target
+/data
+geocode_arc*
+!geocode_architecture_plan.md
+.ansio/
+.docs/
