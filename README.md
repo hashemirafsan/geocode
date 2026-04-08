@@ -8,6 +8,79 @@ Current focus:
 - machine-readable JSON output
 - minimal session foundation
 
+## Architecture Diagram
+
+```text
+User
+  |
+  v
+CLI commands
+  inspect | mean | compare | ask | provider | session
+  |
+  v
+src/app
+  |
+  +--> src/session
+  |      SessionState + SessionStore
+  |
+  +--> src/memory
+  |      turn/session/persistent scaffolding
+  |
+  +--> direct commands build typed plans ------------------+
+  |                                                        |
+  +--> ask -> src/agent -> src/provider -> Planner LLM ----+
+                                                           |
+                                                           v
+src/plan
+  ExecutionPlan + PlanStep + CapabilityInput
+  |
+  +--> src/capability
+  |      Rust-native capability catalog + discovered registry
+  |
+  +--> src/policy
+  |      ExecutionPolicy
+  |
+  v
+src/executor
+  PlanExecutor + ValueStore
+  |
+  +--> typed runtime values
+  |      DatasetRef | InspectReport | MeanReport | CompareReport
+  |      ScalarValue | TableValue | TextValue
+  |
+  +--> src/tools
+  |      workflow orchestration
+  |      |
+  |      v
+  |    src/bindings
+  |      dataset.rs   -> path validation + kind detect
+  |      netcdf.rs   -> crate-backed NetCDF access
+  |      gdal.rs     -> crate-backed GDAL access
+  |      process.rs  -> curated binary fallback
+  |      types.rs    -> shared binding metadata types
+  |
+  +--> src/runtime
+  |      host discovery + controlled known-binary execution
+  |      known binaries: gdalinfo | ncdump | ncgen
+  |
+  v
+src/output
+  text/json render
+```
+
+### Layer Summary
+- `src/agent`: planner request/response normalization and provider-driven planning
+- `src/provider`: provider config, status, and planner client abstraction
+- `src/capability`: Rust-native capability catalog and discovered runtime registry
+- `src/plan`: typed plan IR used by both direct commands and agent execution
+- `src/policy`: curated execution policy over local files and known binaries
+- `src/executor`: deterministic step execution with typed intermediate values
+- `src/tools`: orchestration helpers for current CLI workflows
+- `src/bindings`: backend-family access to NetCDF, GDAL, dataset validation, and curated process fallbacks
+- `src/runtime`: host discovery and controlled known-binary execution
+- `src/session` and `src/memory`: workflow continuity state and memory scaffolding
+- `src/output`: text and JSON rendering
+
 ## Provider Auth Strategy
 Current provider implementation:
 - OpenAI is API key based
