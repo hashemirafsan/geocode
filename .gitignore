@@ -4,3 +4,6 @@ geocode_arc*
 !geocode_architecture_plan.md
 .ansio/
 .docs/
+.geocode*
+capabilities.catalog.json
+capability_runtime_architecture.md

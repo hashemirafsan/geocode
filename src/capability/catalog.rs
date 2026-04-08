@@ -1,0 +1,268 @@
+use serde::{Deserialize, Serialize};
+
+use super::types::CapabilityKind;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityCatalog {
+    pub version: u32,
+    pub catalog_name: &'static str,
+    pub planner_policy: PlannerPolicy,
+    pub binding_families: Vec<BindingFamily>,
+    pub capabilities: Vec<CatalogCapability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannerPolicy {
+    pub planner_sees_semantic_capabilities: bool,
+    pub raw_backend_flags_are_not_planner_surface: bool,
+    pub allow_backend_fallbacks: bool,
+    pub prefer_typed_routes: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingFamilyKind {
+    LocalRuntime,
+    RustCrate,
+    KnownBinary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BindingFamily {
+    pub id: &'static str,
+    pub kind: BindingFamilyKind,
+    pub module: &'static str,
+    pub requires: Vec<&'static str>,
+    pub notes: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityStatus {
+    Implemented,
+    Planned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityPriority {
+    Mvp,
+    Next,
+    Later,
+    Fallback,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogBackendRoute {
+    pub backend: &'static str,
+    pub binding_op: &'static str,
+    pub priority: u8,
+    pub requires: Vec<&'static str>,
+    pub notes: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogCapability {
+    pub id: &'static str,
+    pub kind: CapabilityKind,
+    pub family: &'static str,
+    pub summary: &'static str,
+    pub input_type: &'static str,
+    pub output_type: &'static str,
+    pub status: CapabilityStatus,
+    pub priority: CapabilityPriority,
+    pub planner_visible: bool,
+    pub backends: Vec<CatalogBackendRoute>,
+}
+
+impl CapabilityCatalog {
+    pub fn binding_family(&self, id: &str) -> Option<&BindingFamily> {
+        self.binding_families.iter().find(|family| family.id == id)
+    }
+}
+
+pub fn capability_catalog() -> CapabilityCatalog {
+    CapabilityCatalog {
+        version: 1,
+        catalog_name: "geocode-capabilities",
+        planner_policy: PlannerPolicy {
+            planner_sees_semantic_capabilities: true,
+            raw_backend_flags_are_not_planner_surface: true,
+            allow_backend_fallbacks: true,
+            prefer_typed_routes: true,
+        },
+        binding_families: vec![
+            family(
+                "local_runtime",
+                BindingFamilyKind::LocalRuntime,
+                "src/executor",
+                vec![],
+                "Typed Rust orchestration, validation, compare logic, rendering, and array/stat helpers.",
+            ),
+            family(
+                "filesystem",
+                BindingFamilyKind::LocalRuntime,
+                "src/bindings/dataset.rs",
+                vec![],
+                "Local path validation, dataset kind detection, and future workspace file access.",
+            ),
+            family(
+                "netcdf_crate",
+                BindingFamilyKind::RustCrate,
+                "src/bindings/netcdf.rs",
+                vec!["crate:netcdf"],
+                "Primary NetCDF backend for metadata and variable reads.",
+            ),
+            family(
+                "gdal_crate",
+                BindingFamilyKind::RustCrate,
+                "src/bindings/gdal.rs",
+                vec!["crate:gdal"],
+                "Primary GDAL backend for raster metadata and future raster reads/stats.",
+            ),
+            family(
+                "ncdump_binary",
+                BindingFamilyKind::KnownBinary,
+                "src/bindings/process.rs",
+                vec!["binary:ncdump"],
+                "Fallback NetCDF backend when crate-backed coverage is incomplete or unavailable.",
+            ),
+            family(
+                "gdalinfo_binary",
+                BindingFamilyKind::KnownBinary,
+                "src/bindings/process.rs",
+                vec!["binary:gdalinfo"],
+                "Fallback GDAL backend and current stats parity path for GeoTIFF mean.",
+            ),
+        ],
+        capabilities: vec![
+            cap("dataset.resolve", CapabilityKind::Core, "dataset", "Resolve a dataset alias or path into a dataset reference.", "dataset_selector", "dataset_ref", CapabilityStatus::Implemented, CapabilityPriority::Mvp, true, vec![route("filesystem", "dataset.resolve", 1, vec![], None)]),
+            cap("dataset.kind.detect", CapabilityKind::Core, "dataset", "Detect dataset kind for a local dataset reference.", "dataset_ref", "dataset_kind", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("filesystem", "dataset.detect_kind", 1, vec![], None)]),
+            cap("dataset.open", CapabilityKind::Core, "dataset", "Open a dataset into a typed backend-specific handle.", "dataset_ref", "dataset_handle", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("netcdf_crate", "netcdf.dataset.open", 1, vec!["dataset:netcdf"], None), route("gdal_crate", "raster.dataset.open", 1, vec!["dataset:geotiff"], None)]),
+            cap("dataset.inspect", CapabilityKind::Composite, "dataset", "Inspect essential dataset metadata.", "dataset_ref", "metadata_value", CapabilityStatus::Implemented, CapabilityPriority::Mvp, true, vec![route("netcdf_crate", "netcdf.dataset.inspect", 1, vec!["dataset:netcdf"], None), route("gdal_crate", "raster.dataset.inspect", 1, vec!["dataset:geotiff"], None), route("ncdump_binary", "ncdump.header.inspect", 2, vec!["dataset:netcdf"], None), route("gdalinfo_binary", "gdalinfo.metadata.inspect", 2, vec!["dataset:geotiff"], None)]),
+            cap("netcdf.dataset.open", CapabilityKind::Core, "netcdf", "Open a NetCDF dataset handle.", "dataset_ref", "netcdf_dataset_handle", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("netcdf_crate", "netcdf.dataset.open", 1, vec![], None)]),
+            cap("netcdf.dimension.list", CapabilityKind::Core, "netcdf", "List dimensions in a NetCDF dataset.", "netcdf_dataset_handle", "dimension_list", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("netcdf_crate", "netcdf.dimension.list", 1, vec![], None), route("ncdump_binary", "ncdump.dimension.list", 2, vec![], None)]),
+            cap("netcdf.dimension.describe", CapabilityKind::Core, "netcdf", "Describe a named NetCDF dimension.", "netcdf_dimension_selector", "dimension_info", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("netcdf_crate", "netcdf.dimension.describe", 1, vec![], None), route("ncdump_binary", "ncdump.dimension.describe", 2, vec![], None)]),
+            cap("netcdf.variable.list", CapabilityKind::Core, "netcdf", "List variables in a NetCDF dataset.", "netcdf_dataset_handle", "netcdf_variable_ref_list", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("netcdf_crate", "netcdf.variable.list", 1, vec![], None), route("ncdump_binary", "ncdump.variable.list", 2, vec![], None)]),
+            cap("netcdf.variable.describe", CapabilityKind::Core, "netcdf", "Describe a NetCDF variable including dtype, dimensions, and shape.", "netcdf_variable_ref", "variable_metadata", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("netcdf_crate", "netcdf.variable.describe", 1, vec![], None), route("ncdump_binary", "ncdump.variable.describe", 2, vec![], None)]),
+            cap("netcdf.variable.load", CapabilityKind::Core, "netcdf", "Load a NetCDF variable as a typed array value.", "netcdf_variable_selector", "array_value", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("netcdf_crate", "netcdf.variable.read_f64", 1, vec![], None), route("ncdump_binary", "ncdump.variable.read", 2, vec![], None)]),
+            cap("netcdf.variable.load_slice", CapabilityKind::Core, "netcdf", "Load a slice of a NetCDF variable.", "netcdf_variable_slice_selector", "array_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("netcdf_crate", "netcdf.variable.read_slice", 1, vec![], None), route("ncdump_binary", "ncdump.variable.read_slice", 2, vec![], None)]),
+            cap("netcdf.attribute.list", CapabilityKind::Core, "netcdf", "List dataset or variable attributes for a NetCDF target.", "netcdf_attribute_target", "attribute_list", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("netcdf_crate", "netcdf.attribute.list", 1, vec![], None), route("ncdump_binary", "ncdump.attribute.list", 2, vec![], None)]),
+            cap("netcdf.attribute.get", CapabilityKind::Core, "netcdf", "Read a single attribute from a NetCDF dataset or variable.", "netcdf_attribute_selector", "attribute_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("netcdf_crate", "netcdf.attribute.get", 1, vec![], None), route("ncdump_binary", "ncdump.attribute.get", 2, vec![], None)]),
+            cap("raster.dataset.open", CapabilityKind::Core, "raster", "Open a raster dataset handle.", "dataset_ref", "raster_dataset_handle", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("gdal_crate", "raster.dataset.open", 1, vec![], None)]),
+            cap("raster.dataset.describe", CapabilityKind::Core, "raster", "Describe raster dataset size, band count, and basic metadata.", "raster_dataset_handle", "metadata_value", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("gdal_crate", "raster.dataset.describe", 1, vec![], None), route("gdalinfo_binary", "gdalinfo.dataset.describe", 2, vec![], None)]),
+            cap("raster.dataset.bounds", CapabilityKind::Core, "raster", "Read raster spatial bounds.", "raster_dataset_handle", "bounds_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("gdal_crate", "raster.dataset.bounds", 1, vec![], None), route("gdalinfo_binary", "gdalinfo.dataset.bounds", 2, vec![], None)]),
+            cap("raster.dataset.crs", CapabilityKind::Core, "raster", "Read raster coordinate reference system information.", "raster_dataset_handle", "crs_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("gdal_crate", "raster.dataset.crs", 1, vec![], None), route("gdalinfo_binary", "gdalinfo.dataset.crs", 2, vec![], None)]),
+            cap("raster.band.list", CapabilityKind::Core, "raster", "List raster bands in a dataset.", "raster_dataset_handle", "raster_band_ref_list", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("gdal_crate", "raster.band.list", 1, vec![], None), route("gdalinfo_binary", "gdalinfo.band.list", 2, vec![], None)]),
+            cap("raster.band.describe", CapabilityKind::Core, "raster", "Describe a raster band including dtype and nodata.", "raster_band_ref", "band_metadata", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("gdal_crate", "raster.band.describe", 1, vec![], None), route("gdalinfo_binary", "gdalinfo.band.describe", 2, vec![], None)]),
+            cap("raster.band.read", CapabilityKind::Core, "raster", "Read a full raster band as an array value.", "raster_band_ref", "array_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("gdal_crate", "raster.band.read", 1, vec![], None)]),
+            cap("raster.band.read_window", CapabilityKind::Core, "raster", "Read a window from a raster band.", "raster_window_selector", "array_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("gdal_crate", "raster.band.read_window", 1, vec![], None)]),
+            cap("raster.band.stats", CapabilityKind::Core, "raster", "Compute or fetch raster band statistics.", "raster_band_ref", "stats_value", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("gdalinfo_binary", "gdalinfo.band.stats", 1, vec![], Some("Current parity path for GeoTIFF mean.")), route("gdal_crate", "raster.band.stats", 2, vec![], Some("Promote to priority 1 after parity tests."))]),
+            cap("raster.band.nodata", CapabilityKind::Core, "raster", "Read nodata metadata for a raster band.", "raster_band_ref", "nodata_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("gdal_crate", "raster.band.nodata", 1, vec![], None), route("gdalinfo_binary", "gdalinfo.band.nodata", 2, vec![], None)]),
+            cap("array.mask_nodata", CapabilityKind::Core, "array", "Mask values using nodata metadata.", "array_with_nodata", "array_value", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("local_runtime", "array.mask_nodata", 1, vec![], None)]),
+            cap("array.slice", CapabilityKind::Core, "array", "Slice an array by typed selectors.", "array_slice_selector", "array_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "array.slice", 1, vec![], None)]),
+            cap("array.cast_f64", CapabilityKind::Core, "array", "Cast an array into f64 values.", "array_value", "array_value", CapabilityStatus::Planned, CapabilityPriority::Mvp, true, vec![route("local_runtime", "array.cast_f64", 1, vec![], None)]),
+            cap("array.reshape", CapabilityKind::Core, "array", "Reshape an array with compatible dimensions.", "array_reshape_request", "array_value", CapabilityStatus::Planned, CapabilityPriority::Later, true, vec![route("local_runtime", "array.reshape", 1, vec![], None)]),
+            cap("array.count_valid", CapabilityKind::Core, "array", "Count valid values in an array.", "array_value", "scalar_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "array.count_valid", 1, vec![], None)]),
+            cap("array.diff", CapabilityKind::Core, "array", "Compute element-wise difference between compatible arrays.", "array_pair", "array_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "array.diff", 1, vec![], None)]),
+            cap("array.align_dims", CapabilityKind::Core, "array", "Validate or align array dimensions for composition.", "array_pair", "aligned_array_pair", CapabilityStatus::Planned, CapabilityPriority::Later, true, vec![route("local_runtime", "array.align_dims", 1, vec![], None)]),
+            cap("stats.mean", CapabilityKind::Core, "stats", "Compute the arithmetic mean of an array or dataset target.", "stats_target", "scalar_value", CapabilityStatus::Implemented, CapabilityPriority::Mvp, true, vec![route("local_runtime", "stats.mean", 1, vec![], None)]),
+            cap("stats.min", CapabilityKind::Core, "stats", "Compute the minimum value of an array.", "array_value", "scalar_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "stats.min", 1, vec![], None)]),
+            cap("stats.max", CapabilityKind::Core, "stats", "Compute the maximum value of an array.", "array_value", "scalar_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "stats.max", 1, vec![], None)]),
+            cap("stats.std", CapabilityKind::Core, "stats", "Compute the standard deviation of an array.", "array_value", "scalar_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "stats.std", 1, vec![], None)]),
+            cap("stats.sum", CapabilityKind::Core, "stats", "Compute the sum of an array.", "array_value", "scalar_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "stats.sum", 1, vec![], None)]),
+            cap("stats.quantile", CapabilityKind::Core, "stats", "Compute a quantile for an array.", "quantile_request", "scalar_value", CapabilityStatus::Planned, CapabilityPriority::Later, true, vec![route("local_runtime", "stats.quantile", 1, vec![], None)]),
+            cap("compare.mean_delta", CapabilityKind::Composite, "compare", "Compute mean_b - mean_a between two compatible dataset targets.", "dataset_ref_pair", "table_value", CapabilityStatus::Implemented, CapabilityPriority::Mvp, true, vec![route("local_runtime", "compare.mean_delta", 1, vec![], None)]),
+            cap("compare.max_delta", CapabilityKind::Composite, "compare", "Compute max_b - max_a between two compatible dataset targets.", "dataset_ref_pair", "table_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "compare.max_delta", 1, vec![], None)]),
+            cap("compare.summary", CapabilityKind::Composite, "compare", "Produce a combined comparison summary across multiple scalar stats.", "comparison_request", "table_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "compare.summary", 1, vec![], None)]),
+            cap("render.scalar", CapabilityKind::Composite, "render", "Render a scalar result for output.", "scalar_like_value", "scalar_value", CapabilityStatus::Implemented, CapabilityPriority::Mvp, true, vec![route("local_runtime", "render.scalar", 1, vec![], None)]),
+            cap("render.table", CapabilityKind::Composite, "render", "Render a table result for output.", "table_like_value", "table_value", CapabilityStatus::Implemented, CapabilityPriority::Mvp, true, vec![route("local_runtime", "render.table", 1, vec![], None)]),
+            cap("render.metadata", CapabilityKind::Composite, "render", "Render metadata into a user-facing shape.", "metadata_value", "table_value", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "render.metadata", 1, vec![], None)]),
+            cap("export.json", CapabilityKind::Composite, "export", "Export a typed value to JSON.", "export_request", "file_ref", CapabilityStatus::Planned, CapabilityPriority::Next, true, vec![route("local_runtime", "export.json", 1, vec![], None)]),
+            cap("export.csv", CapabilityKind::Composite, "export", "Export a tabular value to CSV.", "export_request", "file_ref", CapabilityStatus::Planned, CapabilityPriority::Later, true, vec![route("local_runtime", "export.csv", 1, vec![], None)]),
+            cap("process.run_known", CapabilityKind::Host, "process", "Run a curated known binary through the runtime policy layer.", "process_request", "text_value", CapabilityStatus::Implemented, CapabilityPriority::Fallback, false, vec![route("ncdump_binary", "process.run_known", 1, vec![], None), route("gdalinfo_binary", "process.run_known", 1, vec![], None)]),
+        ],
+    }
+}
+
+fn family(
+    id: &'static str,
+    kind: BindingFamilyKind,
+    module: &'static str,
+    requires: Vec<&'static str>,
+    notes: &'static str,
+) -> BindingFamily {
+    BindingFamily {
+        id,
+        kind,
+        module,
+        requires,
+        notes,
+    }
+}
+
+fn route(
+    backend: &'static str,
+    binding_op: &'static str,
+    priority: u8,
+    requires: Vec<&'static str>,
+    notes: Option<&'static str>,
+) -> CatalogBackendRoute {
+    CatalogBackendRoute {
+        backend,
+        binding_op,
+        priority,
+        requires,
+        notes,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cap(
+    id: &'static str,
+    kind: CapabilityKind,
+    family: &'static str,
+    summary: &'static str,
+    input_type: &'static str,
+    output_type: &'static str,
+    status: CapabilityStatus,
+    priority: CapabilityPriority,
+    planner_visible: bool,
+    backends: Vec<CatalogBackendRoute>,
+) -> CatalogCapability {
+    CatalogCapability {
+        id,
+        kind,
+        family,
+        summary,
+        input_type,
+        output_type,
+        status,
+        priority,
+        planner_visible,
+        backends,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{capability_catalog, CapabilityStatus};
+
+    #[test]
+    fn catalog_contains_broad_capability_surface() {
+        let catalog = capability_catalog();
+        assert!(catalog.capabilities.len() > 30);
+        assert!(catalog
+            .capabilities
+            .iter()
+            .any(|cap| cap.id == "netcdf.variable.load"));
+        assert!(catalog
+            .capabilities
+            .iter()
+            .any(|cap| cap.id == "raster.band.stats"));
+        assert!(catalog
+            .capabilities
+            .iter()
+            .any(|cap| cap.status == CapabilityStatus::Implemented));
+    }
+}

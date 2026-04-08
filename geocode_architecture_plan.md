@@ -35,6 +35,12 @@ That means GeoCode should preserve the long-term seams for sessions, providers, 
 - memory is deferred
 - packaging can wait; a developer-facing binary release is enough
 
+### Architecture refinement after initial implementation
+- direct commands stay shippable and deterministic
+- agent mode should not plan against a rigid built-in tool menu
+- internal execution should move toward typed capability composition backed by real host bindings
+- known host/runtime seams should be introduced before richer agent behavior, memory, or TUI work
+
 ### Semantic decisions
 - `compare a b` means `mean_b - mean_a`
 - NetCDF variable selection is explicit when needed
@@ -122,7 +128,9 @@ Important release rule:
 5. Memory must be scoped and should not be introduced before its value is proven.
 6. Tools must be typed, composable primitives.
 7. Provider integration must be replaceable, but should start minimal.
-8. Releases must ship vertical slices with real user value.
+8. Capabilities must map to real runtime implementations such as Rust bindings, curated binaries, or local wrappers.
+9. Policy must expose a curated host surface instead of arbitrary shell execution.
+10. Releases must ship vertical slices with real user value.
 
 ## 8) Business and Functional Requirements
 ### `v0.1` requirements
@@ -186,7 +194,7 @@ This keeps the comparison minimal, deterministic, and scientifically honest for 
 ## 10) Recommended Architecture Shape
 The original wide architecture is directionally correct, but too large for the current stage if implemented literally.
 
-Recommended initial module layout:
+Original initial module layout:
 
 ```text
 geocode/
@@ -214,6 +222,49 @@ Why this shape:
 - avoids many empty submodules
 - keeps implementation minimal
 - allows later splitting without rewrite
+
+### Architecture conflict resolution
+The current implementation introduced an `ask` path that still behaves like an intent router over a small built-in tool menu. That is acceptable as a temporary MVP bridge, but it conflicts with the long-term OpenCode-style direction in four ways:
+- planner output is intent-first instead of capability-graph-first
+- execution is still orchestrated in app code rather than a dedicated typed executor
+- provider-specific request handling leaked into the agent layer
+- session exists, but runtime discovery, policy, and memory separation were still missing
+
+Resolved direction:
+- keep the user-facing CLI command surface narrow
+- refactor internal execution around a typed capability registry and plan IR
+- keep the LLM as planner only
+- keep deterministic execution in Rust
+- allow capability composition over real host/runtime bindings before adding more agent autonomy
+
+### Updated module direction
+The next iteration should keep the CLI/app surface stable while introducing capability-oriented runtime modules:
+
+```text
+geocode/
+├── src/
+│   ├── main.rs
+│   ├── cli.rs
+│   ├── app.rs
+│   ├── engine.rs
+│   ├── output.rs
+│   ├── tools.rs                # existing deterministic dataset wrappers
+│   ├── capability.rs           # registry + discovered planner surface
+│   ├── plan.rs                 # JSON-compatible plan IR
+│   ├── executor.rs             # typed value store + plan executor
+│   ├── runtime.rs              # host discovery + known binary bindings
+│   ├── policy.rs               # curated host policy guard
+│   ├── provider.rs             # provider config + planner client abstraction
+│   ├── session.rs              # session state and store
+│   ├── memory.rs               # turn/session/persistent memory scaffolding
+│   └── agent.rs                # planner request/response + plan normalization
+```
+
+Why this refinement:
+- preserves existing shipping paths
+- introduces the missing runtime seams now
+- avoids a rewrite into deep empty folders too early
+- makes later extraction into submodules straightforward
 
 ### Initial module responsibilities
 #### `cli`
@@ -257,17 +308,31 @@ CLI Parser / Router
       ↓
 App Layer
       ↓
-Execution Engine
+Capability Registry + Policy Guard
       ↓
-Typed Tools
+Planner-visible Capability Surface
+      ↓
+Plan IR
+      ↓
+Typed Executor
+      ↓
+Binding-backed Operations
       ↓
 Result Renderer
       ↓
 Text / JSON Output
 
 Session Store remains sidecar state for command context.
-Agent and provider layers are future extensions over the same execution path.
+Memory remains a separate explicit layer.
+Agent and provider layers plan over the same deterministic execution path.
 ```
+
+### Capability-oriented execution rule
+- planner sees only discovered capabilities
+- each capability must map to a real implementation path
+- direct commands may still call the same capabilities without any LLM involvement
+- known-binary execution must run through policy-checked runtime bindings
+- arbitrary sandboxed code generation is not a normal execution path
 
 ## 12) Session Strategy
 ### `v0.1` session scope
@@ -306,6 +371,12 @@ Persist only:
 - agent mode should reuse the same execution layer as direct commands
 - agent mode should start narrow and optional
 
+### Planner/executor loop rule
+- use a bounded planner -> executor -> verifier style loop
+- keep a max-step budget per turn
+- stop on clarification, validation failure, or successful terminal result
+- do not allow hidden uncontrolled autonomy
+
 ## 14) Release Strategy
 ### Public Release `0.1`
 - direct command mode only
@@ -317,16 +388,18 @@ Persist only:
 
 ### Public Release `0.2`
 - session-aware agent entry
+- capability registry and plan IR foundation
 - stronger JSON contract
 - follow-up query support
 
 ### Public Release `0.3`
-- OpenAI provider integration
+- provider abstraction beyond a single hardcoded client
+- capability discovery and policy guard hardening
 - provider status and selection
 
 ### Public Release `0.4`
 - scoped memory
-- richer tool chaining
+- richer capability chaining and verifier loop
 
 ### Public Release `0.5`
 - TUI
@@ -400,9 +473,22 @@ Goal:
 
 Deliverables:
 - planner request/response schema
-- OpenAI config path
+- capability registry and plan IR
+- provider config path
 - `ask` or `chat`
 - graceful disable when unconfigured
+
+### Milestone 3A: Capability Runtime Foundation
+Goal:
+- move agent and direct commands onto a typed, policy-checked execution seam
+
+Deliverables:
+- capability registry
+- typed value store
+- executor boundary
+- runtime discovery
+- policy guard
+- provider client abstraction
 
 ### Milestone 4: Scoped Memory
 Goal:
@@ -482,6 +568,12 @@ Definition of done:
 Definition of done:
 - minimal tool interface exists with id, typed input/output, validation, execution
 - future tools can plug into the same structure
+
+#### `CORE-002A` Define capability registry contract
+Definition of done:
+- runtime exposes discovered capabilities rather than only a static tool menu
+- capability metadata includes implementation backing and typed input/output contracts
+- planner-visible capability surface is derived from the registry
 
 #### `CORE-003` Define output rendering contract
 Definition of done:
@@ -696,6 +788,12 @@ Definition of done:
 - arguments and target files or variables are explicit
 - no multi-step chaining yet
 
+#### `AGENT-002A` Add plan IR compatibility layer
+Definition of done:
+- planner responses can be normalized into a typed execution plan
+- legacy intent-style responses can still be adapted during MVP transition
+- direct commands and agent mode share the same executor path where practical
+
 #### `AGENT-003` Add agent CLI entrypoint
 Definition of done:
 - CLI supports `geocode ask <query>` or `geocode chat`
@@ -831,6 +929,12 @@ Definition of done:
 Definition of done:
 - planner schema supports ordered tool steps
 - intermediate objects are explicit
+
+#### `PLAN-000` Define typed plan IR and value references
+Definition of done:
+- plan IR is JSON-compatible
+- steps reference typed capabilities instead of ad hoc tool names
+- intermediate references are explicit and validated before execution
 
 #### `PLAN-002` Add plan validation layer
 Definition of done:

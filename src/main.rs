@@ -1,9 +1,16 @@
 mod agent;
 mod app;
+mod bindings;
+mod capability;
 mod cli;
 mod engine;
+mod executor;
+mod memory;
 mod output;
+mod plan;
+mod policy;
 mod provider;
+mod runtime;
 mod session;
 mod tools;
 

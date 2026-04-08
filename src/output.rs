@@ -104,6 +104,10 @@ fn render_ask(response: &CommandResponse) -> String {
                 .join(", ")
         })
         .unwrap_or_default();
+    let step_count = response.details["plan"]["plan"]["steps"]
+        .as_array()
+        .map(|steps| steps.len())
+        .unwrap_or_default();
     let selected_files = response.details["request"]["selected_files"]
         .as_array()
         .map(|files| {
@@ -123,7 +127,8 @@ fn render_ask(response: &CommandResponse) -> String {
 
     if intent != "unknown" {
         lines.push(format!("Variable: {variable}"));
-        lines.push(format!("Planned Tools: {tools}"));
+        lines.push(format!("Planned Capabilities: {tools}"));
+        lines.push(format!("Plan Steps: {step_count}"));
     }
 
     lines.push(format!("Needs Clarification: {requires_clarification}"));
