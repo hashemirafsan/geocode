@@ -11,75 +11,93 @@ Current focus:
 ## Architecture Diagram
 
 ```text
-User
-  |
-  v
-CLI commands
-  inspect | mean | compare | ask | provider | session
-  |
-  v
-src/app
-  |
-  +--> src/session
-  |      SessionState + SessionStore
-  |
-  +--> src/memory
-  |      turn/session/persistent scaffolding
-  |
-  +--> direct commands build typed plans ------------------+
-  |                                                        |
-  +--> ask -> src/agent -> src/provider -> Planner LLM ----+
-                                                           |
-                                                           v
-src/plan
-  ExecutionPlan + PlanStep + CapabilityInput
-  |
-  +--> src/capability
-  |      Rust-native capability catalog + discovered registry
-  |
-  +--> src/policy
-  |      ExecutionPolicy
-  |
-  v
-src/executor
-  PlanExecutor + ValueStore
-  |
-  +--> typed runtime values
-  |      DatasetRef | InspectReport | MeanReport | CompareReport
-  |      ScalarValue | TableValue | TextValue
-  |
-  +--> src/tools
-  |      workflow orchestration
-  |      |
-  |      v
-  |    src/bindings
-  |      dataset.rs   -> path validation + kind detect
-  |      netcdf.rs   -> crate-backed NetCDF access
-  |      gdal.rs     -> crate-backed GDAL access
-  |      process.rs  -> curated binary fallback
-  |      types.rs    -> shared binding metadata types
-  |
-  +--> src/runtime
-  |      host discovery + controlled known-binary execution
-  |      known binaries: gdalinfo | ncdump | ncgen
-  |
-  v
-src/output
-  text/json render
++---------------------------------------------------------------+
+|                           USER INPUT                          |
+|  Direct commands: inspect | mean | compare | provider | session |
+|  Agent command: ask                                             |
++---------------------------------------------------------------+
+                               |
+                               v
++---------------------------------------------------------------+
+|                      REQUEST ORCHESTRATION                     |
+|  - Direct commands build typed plans                           |
+|  - Agent requests go to a planner model                        |
+|  - Planner returns a structured plan, not executable code      |
++---------------------------------------------------------------+
+                               |
+                               v
++---------------------------------------------------------------+
+|                           TYPED PLAN                           |
+|  - Goal                                                        |
+|  - Ordered capability steps                                    |
+|  - Typed references to intermediate values                     |
++---------------------------------------------------------------+
+                               |
+                               v
++---------------------------------------------------------------+
+|                 CAPABILITY REGISTRY + POLICY GATE              |
+|  Capability registry:                                          |
+|  - Exposes planner-safe semantic operations                    |
+|  - Chooses from discovered runtime support                     |
+|                                                                |
+|  Policy gate:                                                  |
+|  - Allows curated local operations only                        |
+|  - Rejects arbitrary shell and arbitrary network access        |
++---------------------------------------------------------------+
+                               |
+                               v
++---------------------------------------------------------------+
+|                    DETERMINISTIC RUST EXECUTOR                 |
+|  - Validates each step                                         |
+|  - Executes capabilities in Rust                               |
+|  - Stores typed intermediate values                            |
+|  - Produces traceable results                                  |
++---------------------------------------------------------------+
+                               |
+                               v
++---------------------------------------------------------------+
+|                     WORKFLOW + BINDING LAYERS                  |
+|  Workflow orchestration:                                       |
+|  - current inspect / mean / compare flows                      |
+|                                                                |
+|  Backend-family bindings:                                      |
+|  - dataset validation and dataset kind detection               |
+|  - NetCDF crate-backed access                                  |
+|  - GDAL crate-backed access                                    |
+|  - curated known-binary fallback where needed                  |
++---------------------------------------------------------------+
+                               |
+                               v
++---------------------------------------------------------------+
+|                          HOST RUNTIME                          |
+|  - Discovers machine support at startup                        |
+|  - Knows approved binaries and host capabilities               |
+|  - Current examples: gdalinfo, ncdump, ncgen                   |
++---------------------------------------------------------------+
+
++---------------------------------------------------------------+
+|                       SESSION + MEMORY                         |
+|  Session state: workspace, aliases, current goal, prior results|
+|  Memory scaffolding: turn, session, persistent user/config     |
++---------------------------------------------------------------+
+
++---------------------------------------------------------------+
+|                           OUTPUTS                              |
+|  - Human-readable text                                         |
+|  - Machine-readable JSON                                       |
++---------------------------------------------------------------+
 ```
 
 ### Layer Summary
-- `src/agent`: planner request/response normalization and provider-driven planning
-- `src/provider`: provider config, status, and planner client abstraction
-- `src/capability`: Rust-native capability catalog and discovered runtime registry
-- `src/plan`: typed plan IR used by both direct commands and agent execution
-- `src/policy`: curated execution policy over local files and known binaries
-- `src/executor`: deterministic step execution with typed intermediate values
-- `src/tools`: orchestration helpers for current CLI workflows
-- `src/bindings`: backend-family access to NetCDF, GDAL, dataset validation, and curated process fallbacks
-- `src/runtime`: host discovery and controlled known-binary execution
-- `src/session` and `src/memory`: workflow continuity state and memory scaffolding
-- `src/output`: text and JSON rendering
+- Request entry: direct CLI commands and agent requests both end up as typed plans.
+- Planner role: the LLM may choose steps, but it never executes geospatial work itself.
+- Capability layer: planner-visible operations are semantic and typed, not raw shell commands.
+- Policy layer: the runtime decides what host access is allowed before any step runs.
+- Executor layer: Rust executes plans deterministically and stores typed intermediate values.
+- Binding layer: real work is backed by NetCDF, GDAL, filesystem checks, and curated process fallbacks.
+- Runtime layer: machine discovery determines which backends are actually available.
+- State layer: session and memory keep continuity without turning execution into hidden autonomy.
+- Output layer: every result can be rendered for humans or emitted as JSON for automation.
 
 ## Provider Auth Strategy
 Current provider implementation:
