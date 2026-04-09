@@ -3,6 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::{
+    array,
     bindings::{
         describe_netcdf_variable, list_netcdf_dimensions, list_netcdf_variables,
         open_netcdf_dataset, read_netcdf_variable, ArrayValue, DatasetHandle, NetcdfDatasetHandle,
@@ -120,11 +121,23 @@ impl PlanExecutor {
                         };
                     RuntimeValue::ArrayValue(read_netcdf_variable(&variable_ref)?)
                 }
+                CapabilityInput::ArraySort { input, descending } => {
+                    let array = self.resolve_required_array_value(input, &values)?;
+                    RuntimeValue::ArrayValue(array::sort(array, *descending))
+                }
+                CapabilityInput::ArrayTake {
+                    input,
+                    count,
+                    from_end,
+                } => {
+                    let array = self.resolve_required_array_value(input, &values)?;
+                    RuntimeValue::ArrayValue(array::take(array, *count, *from_end))
+                }
                 CapabilityInput::StatsMean { input, variable } => {
                     if let Some(array) = self.resolve_array_value(input, &values)? {
                         RuntimeValue::ScalarValue(ScalarValue {
                             label: variable.clone().unwrap_or_else(|| "mean".to_string()),
-                            value: arithmetic_mean(&array.values)?,
+                            value: array::mean(array)?,
                         })
                     } else {
                         let dataset = self.resolve_dataset_target(input, &values, session)?;
@@ -138,14 +151,14 @@ impl PlanExecutor {
                     let array = self.resolve_required_array_value(input, &values)?;
                     RuntimeValue::ScalarValue(ScalarValue {
                         label: variable.clone().unwrap_or_else(|| "min".to_string()),
-                        value: arithmetic_min(&array.values)?,
+                        value: array::min(array)?,
                     })
                 }
                 CapabilityInput::StatsMax { input, variable } => {
                     let array = self.resolve_required_array_value(input, &values)?;
                     RuntimeValue::ScalarValue(ScalarValue {
                         label: variable.clone().unwrap_or_else(|| "max".to_string()),
-                        value: arithmetic_max(&array.values)?,
+                        value: array::max(array)?,
                     })
                 }
                 CapabilityInput::CompareMeanDelta {
@@ -361,9 +374,18 @@ impl PlanExecutor {
                             .unwrap_or_else(|| "mean".to_string()),
                         value: format!("{:.6}", report.mean),
                     }),
+                    RuntimeValue::ArrayValue(array) => {
+                        rows.extend(array.values().iter().enumerate().map(|(index, value)| {
+                            TableRow {
+                                label: format!("value_{}", index + 1),
+                                value: format!("{value:.6}"),
+                            }
+                        }));
+                    }
                     _ => {
                         return Err(ExecutionError::Plan(
-                            "render.table multi-input mode requires scalar-like inputs".into(),
+                            "render.table multi-input mode requires scalar-like or array inputs"
+                                .into(),
                         ))
                     }
                 }
@@ -387,6 +409,18 @@ impl PlanExecutor {
                     .map(|variable| TableRow {
                         label: variable.name.clone(),
                         value: "netcdf variable".to_string(),
+                    })
+                    .collect(),
+            }),
+            RuntimeValue::ArrayValue(array) => Ok(TableValue {
+                title: title.to_string(),
+                rows: array
+                    .values()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| TableRow {
+                        label: format!("value_{}", index + 1),
+                        value: format!("{value:.6}"),
                     })
                     .collect(),
             }),
@@ -447,32 +481,6 @@ impl PlanExecutor {
             )),
         }
     }
-}
-
-fn arithmetic_mean(values: &[f64]) -> Result<f64, ExecutionError> {
-    if values.is_empty() {
-        return Err(ExecutionError::InvalidInput(
-            "cannot compute a mean over zero values".into(),
-        ));
-    }
-
-    Ok(values.iter().sum::<f64>() / values.len() as f64)
-}
-
-fn arithmetic_min(values: &[f64]) -> Result<f64, ExecutionError> {
-    values
-        .iter()
-        .copied()
-        .reduce(f64::min)
-        .ok_or_else(|| ExecutionError::InvalidInput("cannot compute min over zero values".into()))
-}
-
-fn arithmetic_max(values: &[f64]) -> Result<f64, ExecutionError> {
-    values
-        .iter()
-        .copied()
-        .reduce(f64::max)
-        .ok_or_else(|| ExecutionError::InvalidInput("cannot compute max over zero values".into()))
 }
 
 #[cfg(test)]

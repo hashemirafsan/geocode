@@ -43,7 +43,7 @@ impl ProviderConfig {
                 let model = env::var("OPENAI_MODEL")
                     .ok()
                     .or_else(|| stored.as_ref().and_then(|config| config.model.clone()))
-                    .unwrap_or_else(|| "gpt-4.1-mini".to_string());
+                    .unwrap_or_else(|| "gpt-4o-mini".to_string());
                 let base_url = env::var("OPENAI_BASE_URL")
                     .ok()
                     .or_else(|| stored.as_ref().and_then(|config| config.base_url.clone()))

@@ -312,6 +312,9 @@ fn handle_ask(
     policy: &ExecutionPolicy,
     session: &mut SessionState,
 ) -> Result<(CommandResponse, bool), ExecutionError> {
+    use std::time::Instant;
+
+    let start_time = Instant::now();
     let provider = select_ask_provider()?;
 
     let selected_files = args
@@ -320,13 +323,35 @@ fn handle_ask(
         .map(|path| path.display().to_string())
         .collect();
     let request = agent::build_request(args.query.clone(), selected_files, session, registry);
+
     eprintln!("Thinking...");
+    eprintln!("Request time: {:?}", start_time.elapsed());
+
+    let plan_start = Instant::now();
     let planner_response = agent::plan_with_provider(&request, &provider.config)?;
+    let plan_duration = plan_start.elapsed();
+
+    eprintln!("LLM response received in: {:?}", plan_duration);
+    eprintln!("\n--- LLM Response ---");
+    match serde_json::to_string_pretty(&planner_response) {
+        Ok(json) => eprintln!("{}", json),
+        Err(e) => eprintln!("Error formatting response: {}", e),
+    }
+    eprintln!("--- End LLM Response ---\n");
+
+    if let Some(plan) = &planner_response.plan {
+        eprintln!("Generated plan: {} steps", plan.steps.len());
+    }
 
     if !planner_response.requires_clarification {
         if let Some(plan) = planner_response.plan.as_ref() {
             eprintln!("Executing capability plan...");
+            let exec_start = Instant::now();
             if let Some(executed) = execute_agent_plan(plan, registry, policy, session)? {
+                let exec_duration = exec_start.elapsed();
+                let total_duration = start_time.elapsed();
+                eprintln!("Execution time: {:?}", exec_duration);
+                eprintln!("Total time: {:?}", total_duration);
                 return Ok((executed, true));
             }
         }
@@ -338,6 +363,9 @@ fn handle_ask(
         outcome: "planned".to_string(),
     });
 
+    let total_duration = start_time.elapsed();
+    eprintln!("Total time: {:?}", total_duration);
+
     Ok((
         CommandResponse {
             command: "ask",
@@ -348,6 +376,10 @@ fn handle_ask(
                 "request": request,
                 "plan": planner_response,
                 "registry": registry,
+                "timing": {
+                    "total_ms": total_duration.as_millis(),
+                    "plan_ms": plan_duration.as_millis(),
+                }
             }),
         },
         true,
@@ -419,6 +451,19 @@ fn execute_agent_plan(
             details: serde_json::json!({
                 "title": value.title,
                 "rows": value.rows,
+                "capability_trace": trace,
+            }),
+        })),
+        Some(RuntimeValue::ArrayValue(value)) => Ok(Some(CommandResponse {
+            command: "ask_result",
+            summary: "Array Result".to_string(),
+            dataset_kind: None,
+            details: serde_json::json!({
+                "title": "Array Result",
+                "rows": value.values().iter().enumerate().map(|(index, item)| serde_json::json!({
+                    "label": format!("value_{}", index + 1),
+                    "value": format!("{item:.6}"),
+                })).collect::<Vec<_>>(),
                 "capability_trace": trace,
             }),
         })),

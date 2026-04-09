@@ -16,6 +16,10 @@ pub enum CapabilityId {
     NetcdfVariableDescribe,
     #[serde(rename = "netcdf.variable.load")]
     NetcdfVariableLoad,
+    #[serde(rename = "array.sort")]
+    ArraySort,
+    #[serde(rename = "array.take")]
+    ArrayTake,
     #[serde(rename = "stats.mean")]
     StatsMean,
     #[serde(rename = "stats.min")]
@@ -42,6 +46,8 @@ impl CapabilityId {
             Self::NetcdfVariableList => "netcdf.variable.list",
             Self::NetcdfVariableDescribe => "netcdf.variable.describe",
             Self::NetcdfVariableLoad => "netcdf.variable.load",
+            Self::ArraySort => "array.sort",
+            Self::ArrayTake => "array.take",
             Self::StatsMean => "stats.mean",
             Self::StatsMin => "stats.min",
             Self::StatsMax => "stats.max",
@@ -61,6 +67,8 @@ impl CapabilityId {
             "netcdf.variable.list" => Some(Self::NetcdfVariableList),
             "netcdf.variable.describe" => Some(Self::NetcdfVariableDescribe),
             "netcdf.variable.load" => Some(Self::NetcdfVariableLoad),
+            "array.sort" => Some(Self::ArraySort),
+            "array.take" => Some(Self::ArrayTake),
             "stats.mean" => Some(Self::StatsMean),
             "stats.min" => Some(Self::StatsMin),
             "stats.max" => Some(Self::StatsMax),
@@ -106,6 +114,10 @@ pub struct CapabilityDescriptor {
     pub output_type: String,
     pub planner_visible: bool,
     pub bindings: Vec<CapabilityBinding>,
+    #[serde(default)]
+    pub input_schema_example: Option<String>,
+    #[serde(default)]
+    pub planning_notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,4 +127,8 @@ pub struct PlannerCapabilityDescriptor {
     pub kind: CapabilityKind,
     pub input_type: String,
     pub output_type: String,
+    #[serde(default)]
+    pub input_schema_example: Option<String>,
+    #[serde(default)]
+    pub planning_notes: Option<String>,
 }

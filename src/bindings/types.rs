@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+pub use crate::array::ArrayValue;
 use crate::engine::DatasetRef;
 
 #[derive(Debug, Clone, Serialize)]
@@ -23,12 +24,6 @@ pub enum DatasetHandle {
 pub struct NetcdfVariableRef {
     pub dataset: NetcdfDatasetHandle,
     pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ArrayValue {
-    pub values: Vec<f64>,
-    pub shape: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]

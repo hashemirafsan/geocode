@@ -80,10 +80,7 @@ pub fn read_netcdf_variable(
     let values =
         read_netcdf_variable_values(&variable_ref.dataset.dataset.path, &variable_ref.name)?;
 
-    Ok(ArrayValue {
-        values,
-        shape: metadata.shape,
-    })
+    ArrayValue::from_shape_values(metadata.shape, values)
 }
 
 pub fn read_netcdf_metadata(path: &Path) -> Result<NetcdfMetadata, ExecutionError> {
@@ -264,8 +261,8 @@ mod tests {
         assert_eq!(dimensions.len(), 2);
         assert_eq!(variables[0].name, "depth");
         assert_eq!(metadata.shape, vec![2, 3]);
-        assert_eq!(array.shape, vec![2, 3]);
-        assert_eq!(array.values.len(), 6);
+        assert_eq!(array.shape(), vec![2, 3]);
+        assert_eq!(array.values().len(), 6);
     }
 
     fn create_sample_netcdf(dir: &Path) -> std::path::PathBuf {

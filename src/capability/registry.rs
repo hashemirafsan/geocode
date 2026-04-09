@@ -49,6 +49,8 @@ impl CapabilityRegistry {
                 kind: capability.kind,
                 input_type: capability.input_type.clone(),
                 output_type: capability.output_type.clone(),
+                input_schema_example: capability.input_schema_example.clone(),
+                planning_notes: capability.planning_notes.clone(),
             })
             .collect()
     }
@@ -96,6 +98,8 @@ fn descriptor_from_catalog(
         output_type: entry.output_type.to_string(),
         planner_visible: entry.planner_visible,
         bindings,
+        input_schema_example: entry.input_schema_example.map(ToString::to_string),
+        planning_notes: entry.planning_notes.map(ToString::to_string),
     })
 }
 

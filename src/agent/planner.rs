@@ -2,9 +2,12 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    agent::schema::{
-        deserialize_string_or_vec, normalize_planner_response, preflight_scope_check, AgentIntent,
-        PlannerRequest, PlannerResponse,
+    agent::{
+        prompt_builder::PromptBuilder,
+        schema::{
+            deserialize_string_or_vec, normalize_planner_response, preflight_scope_check,
+            AgentIntent, PlannerRequest, PlannerResponse,
+        },
     },
     engine::ExecutionError,
     provider::planner_client,
@@ -19,43 +22,14 @@ pub fn plan_with_provider(
         return Ok(response);
     }
 
-    let request_json = if matches!(provider.provider, crate::provider::ProviderKind::LmStudio) {
-        serde_json::to_string(request).map_err(|err| ExecutionError::Agent(err.to_string()))?
-    } else {
-        serde_json::to_string_pretty(request)
-            .map_err(|err| ExecutionError::Agent(err.to_string()))?
-    };
+    let prompt_builder = PromptBuilder::new(provider.provider);
+    let prompts = prompt_builder.build(request);
 
-    let prompt = format!(
-        "You are GeoCode's planner. Convert the user request into JSON only. \
-Return exactly one JSON object with keys: intent, target_files, variable, tool_ids, requires_clarification, clarification_question, plan. \
-Allowed intent values: inspect, mean, compare, unknown. \
-Treat the current user_input as authoritative. Use session.current_goal only when the current query is referential, such as 'that', 'same', 'previous', or 'again'. \
-If explicit file selections are provided, do not ask clarification questions about prior goals unless the new query is genuinely ambiguous. \
-The primary contract is the plan field. Build a typed plan using only available_capabilities. \
-Tool ids must map to capability ids used by the plan. \
-Each plan step must have: id, capability, input. \
-Use step references like {{\"type\":\"step\",\"step\":\"s1\"}} or \"$s1\". \
-Do not use foreach, action, output, final_output, loops, or free-form workflow syntax. \
-Prefer the smallest executable plan that answers the current query. \
-If explicit files and an explicit variable name are present, prefer execution over unnecessary clarification. \
-If the query asks for multiple scalar outputs such as min and max, end with a single render.table step using an inputs array rather than multiple render.scalar steps. \
-If the user asks for all variables or all parameters in a single selected dataset, that is not ambiguous: produce a plan that lists them all instead of asking clarification. \
-Do not encode clarification text inside render steps; use requires_clarification and clarification_question instead. \
-Capability constraints: dataset.open consumes a dataset reference and returns a dataset handle. netcdf.variable.list consumes a dataset handle and returns a variable list. netcdf.variable.describe and netcdf.variable.load require a single variable selector with a handle plus a variable name; do not pass a whole variable list into those steps. For single-file requests about all variables, shapes, and sizes, prefer dataset.inspect or dataset.open + netcdf.variable.list rather than per-variable describe steps. \
-If a safe valid plan cannot be formed, set requires_clarification=true and ask one question. \
-Do not execute anything.\n\nRequest JSON:\n{}",
-        request_json
-    );
-
-    let system_prompt = if matches!(provider.provider, crate::provider::ProviderKind::LmStudio) {
-        "/no_think You are a strict JSON planner for a geospatial CLI. Return JSON only with no markdown. Keep the response minimal and do not include reasoning.".to_string()
-    } else {
-        "You are a strict JSON planner for a geospatial CLI. Return JSON only with no markdown."
-            .to_string()
-    };
-
-    let content = planner_client(provider.provider).plan_json(provider, &system_prompt, &prompt)?;
+    let content = planner_client(provider.provider).plan_json(
+        provider,
+        &prompts.system_prompt,
+        &prompts.user_prompt,
+    )?;
 
     let raw: RawPlannerResponse = serde_json::from_str(&content).map_err(|err| {
         let snippet = if content.len() > 2000 {

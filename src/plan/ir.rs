@@ -57,6 +57,15 @@ pub enum CapabilityInput {
         dataset: PlanValueRef,
         name: String,
     },
+    ArraySort {
+        input: PlanValueRef,
+        descending: bool,
+    },
+    ArrayTake {
+        input: PlanValueRef,
+        count: usize,
+        from_end: bool,
+    },
     StatsMean {
         input: PlanValueRef,
         variable: Option<String>,
@@ -243,6 +252,23 @@ fn parse_capability_input(
                 });
             }
         }
+        CapabilityId::ArraySort => {
+            if let Ok(reference) = parse_plan_value_ref(&value) {
+                return Ok(CapabilityInput::ArraySort {
+                    input: reference,
+                    descending: true,
+                });
+            }
+        }
+        CapabilityId::ArrayTake => {
+            if let Ok(reference) = parse_plan_value_ref(&value) {
+                return Ok(CapabilityInput::ArrayTake {
+                    input: reference,
+                    count: 5,
+                    from_end: false,
+                });
+            }
+        }
         CapabilityId::StatsMin => {
             if let Ok(reference) = parse_plan_value_ref(&value) {
                 return Ok(CapabilityInput::StatsMin {
@@ -284,10 +310,29 @@ fn parse_capability_input(
         .ok_or_else(|| format!("input for {} must be an object", capability.as_str()))?;
 
     match capability {
-        CapabilityId::DatasetResolve => Ok(CapabilityInput::DatasetResolve {
-            alias: string_field(object, "alias"),
-            path: string_field(object, "path"),
-        }),
+        CapabilityId::DatasetResolve => {
+            let alias = string_field(object, "alias")
+                .or_else(|| string_field(object, "dataset_alias"))
+                .or_else(|| string_field(object, "name"));
+            let path = string_field(object, "path")
+                .or_else(|| string_field(object, "file"))
+                .or_else(|| string_field(object, "file_path"))
+                .or_else(|| string_field(object, "dataset"))
+                .or_else(|| string_field(object, "dataset_path"))
+                .or_else(|| string_field(object, "selector"))
+                .or_else(|| string_field(object, "target_file"))
+                .or_else(|| string_field(object, "target_path"));
+
+            if alias.is_none() && path.is_none() {
+                return Err(format!(
+                    "dataset.resolve input is missing alias/path fields: {}",
+                    serde_json::to_string(object)
+                        .unwrap_or_else(|_| "<unserializable input>".to_string())
+                ));
+            }
+
+            Ok(CapabilityInput::DatasetResolve { alias, path })
+        }
         CapabilityId::DatasetOpen => Ok(CapabilityInput::DatasetOpen {
             dataset: value_ref_field(object, "dataset")
                 .or_else(|_| value_ref_field(object, "dataset_ref"))
@@ -332,6 +377,19 @@ fn parse_capability_input(
                 .or_else(|| string_field_in_object(object, "selector", "name"))
                 .or_else(|| string_field_in_object(object, "selector", "variable_name"))
                 .unwrap_or_default(),
+        }),
+        CapabilityId::ArraySort => Ok(CapabilityInput::ArraySort {
+            input: value_ref_field(object, "input")
+                .or_else(|_| value_ref_field(object, "target"))
+                .or_else(|_| value_ref_field(object, "array_value"))?,
+            descending: bool_field(object, &["descending", "largest", "top"]).unwrap_or(true),
+        }),
+        CapabilityId::ArrayTake => Ok(CapabilityInput::ArrayTake {
+            input: value_ref_field(object, "input")
+                .or_else(|_| value_ref_field(object, "target"))
+                .or_else(|_| value_ref_field(object, "array_value"))?,
+            count: usize_field(object, &["count", "k", "n", "limit"]).unwrap_or(5),
+            from_end: bool_field(object, &["from_end", "last", "tail"]).unwrap_or(false),
         }),
         CapabilityId::StatsMean => Ok(CapabilityInput::StatsMean {
             input: value_ref_field(object, "input")
@@ -466,10 +524,7 @@ fn parse_plan_value_ref(value: &Value) -> Result<PlanValueRef, String> {
 }
 
 fn string_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
-    object
-        .get(key)
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
+    object.get(key).and_then(loose_string_value)
 }
 
 fn string_field_in_object(
@@ -483,11 +538,72 @@ fn string_field_in_object(
         .and_then(|nested| string_field(nested, child_key))
 }
 
+fn loose_string_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) if items.len() == 1 => loose_string_value(&items[0]),
+        Value::Object(object) => {
+            for key in [
+                "path",
+                "file",
+                "file_path",
+                "dataset",
+                "dataset_path",
+                "target_file",
+                "target_path",
+                "dataset_ref",
+                "ref",
+                "name",
+                "alias",
+                "dataset_alias",
+                "variable_name",
+            ] {
+                if let Some(value) = object.get(key).and_then(loose_string_value) {
+                    return Some(value);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 fn required_string_field(
     object: &serde_json::Map<String, Value>,
     key: &str,
 ) -> Result<String, String> {
     string_field(object, key).ok_or_else(|| format!("missing `{key}` string field"))
+}
+
+fn usize_field(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<usize> {
+    keys.iter().find_map(|key| {
+        object.get(*key).and_then(|value| match value {
+            Value::Number(number) => number.as_u64().map(|n| n as usize),
+            Value::String(text) => text.parse::<usize>().ok(),
+            Value::Array(items) if items.len() == 1 => {
+                items[0].as_u64().map(|n| n as usize).or_else(|| {
+                    items[0]
+                        .as_str()
+                        .and_then(|text| text.parse::<usize>().ok())
+                })
+            }
+            _ => None,
+        })
+    })
+}
+
+fn bool_field(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|key| {
+        object.get(*key).and_then(|value| match value {
+            Value::Bool(flag) => Some(*flag),
+            Value::String(text) => match text.to_ascii_lowercase().as_str() {
+                "true" | "yes" | "top" | "largest" | "desc" | "descending" => Some(true),
+                "false" | "no" | "bottom" | "smallest" | "asc" | "ascending" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        })
+    })
 }
 
 #[cfg(test)]

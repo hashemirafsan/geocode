@@ -1,5 +1,6 @@
 mod agent;
 mod app;
+mod array;
 mod bindings;
 mod capability;
 mod cli;

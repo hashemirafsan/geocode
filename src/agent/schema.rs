@@ -8,13 +8,34 @@ use crate::{
     tools::detect_dataset_kind,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentIntent {
     Inspect,
     Mean,
+    Min,
+    Max,
     Compare,
+    Stats,
     Unknown,
+}
+
+impl<'de> Deserialize<'de> for AgentIntent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "inspect" | "dataset.inspect" => Self::Inspect,
+            "mean" | "stats.mean" => Self::Mean,
+            "min" | "stats.min" => Self::Min,
+            "max" | "stats.max" => Self::Max,
+            "compare" | "compare.mean_delta" => Self::Compare,
+            "stats" => Self::Stats,
+            _ => Self::Unknown,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
