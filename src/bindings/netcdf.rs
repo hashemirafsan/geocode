@@ -3,34 +3,100 @@ use std::path::Path;
 use netcdf::types::{FloatType, IntType, NcVariableType};
 
 use crate::{
-    bindings::{DimensionInfo, NetcdfMetadata, VariableMetadata},
-    engine::ExecutionError,
+    bindings::{
+        ArrayValue, DimensionInfo, NetcdfDatasetHandle, NetcdfMetadata, NetcdfVariableRef,
+        VariableMetadata,
+    },
+    engine::{DatasetKind, DatasetRef, ExecutionError},
 };
 
-pub fn read_netcdf_metadata(path: &Path) -> Result<NetcdfMetadata, ExecutionError> {
-    let file = netcdf::open(path)
+pub fn open_netcdf_dataset(dataset: &DatasetRef) -> Result<NetcdfDatasetHandle, ExecutionError> {
+    if !matches!(dataset.kind, DatasetKind::Netcdf) {
+        return Err(ExecutionError::Capability(
+            "dataset.open currently expects a NetCDF dataset for netcdf operations".into(),
+        ));
+    }
+
+    netcdf::open(&dataset.path)
         .map_err(|err| ExecutionError::Command(format!("failed to open netcdf dataset: {err}")))?;
 
-    let dimensions = file
+    Ok(NetcdfDatasetHandle {
+        dataset: dataset.clone(),
+    })
+}
+
+pub fn list_netcdf_dimensions(
+    handle: &NetcdfDatasetHandle,
+) -> Result<Vec<DimensionInfo>, ExecutionError> {
+    let file = netcdf::open(&handle.dataset.path)
+        .map_err(|err| ExecutionError::Command(format!("failed to open netcdf dataset: {err}")))?;
+
+    Ok(file
         .dimensions()
         .map(|dimension| DimensionInfo {
             name: dimension.name(),
             length: Some(dimension.len()),
         })
-        .collect::<Vec<_>>();
+        .collect())
+}
 
-    let variables = file
+pub fn list_netcdf_variables(
+    handle: &NetcdfDatasetHandle,
+) -> Result<Vec<NetcdfVariableRef>, ExecutionError> {
+    let file = netcdf::open(&handle.dataset.path)
+        .map_err(|err| ExecutionError::Command(format!("failed to open netcdf dataset: {err}")))?;
+
+    Ok(file
         .variables()
-        .map(|variable| {
-            let dims = variable.dimensions();
-            VariableMetadata {
-                name: variable.name(),
-                dtype: format_netcdf_dtype(&variable.vartype()),
-                dimensions: dims.iter().map(|dimension| dimension.name()).collect(),
-                shape: dims.iter().map(|dimension| dimension.len()).collect(),
-            }
+        .map(|variable| NetcdfVariableRef {
+            dataset: handle.clone(),
+            name: variable.name(),
         })
-        .collect::<Vec<_>>();
+        .collect())
+}
+
+pub fn describe_netcdf_variable(
+    variable_ref: &NetcdfVariableRef,
+) -> Result<VariableMetadata, ExecutionError> {
+    let file = netcdf::open(&variable_ref.dataset.dataset.path)
+        .map_err(|err| ExecutionError::Command(format!("failed to open netcdf dataset: {err}")))?;
+    let variable = file
+        .variable(&variable_ref.name)
+        .ok_or_else(|| ExecutionError::InvalidVariable(variable_ref.name.clone()))?;
+    let dims = variable.dimensions();
+
+    Ok(VariableMetadata {
+        name: variable.name(),
+        dtype: format_netcdf_dtype(&variable.vartype()),
+        dimensions: dims.iter().map(|dimension| dimension.name()).collect(),
+        shape: dims.iter().map(|dimension| dimension.len()).collect(),
+    })
+}
+
+pub fn read_netcdf_variable(
+    variable_ref: &NetcdfVariableRef,
+) -> Result<ArrayValue, ExecutionError> {
+    let metadata = describe_netcdf_variable(variable_ref)?;
+    let values =
+        read_netcdf_variable_values(&variable_ref.dataset.dataset.path, &variable_ref.name)?;
+
+    Ok(ArrayValue {
+        values,
+        shape: metadata.shape,
+    })
+}
+
+pub fn read_netcdf_metadata(path: &Path) -> Result<NetcdfMetadata, ExecutionError> {
+    let dataset = DatasetRef {
+        path: path.to_path_buf(),
+        kind: DatasetKind::Netcdf,
+    };
+    let handle = open_netcdf_dataset(&dataset)?;
+    let dimensions = list_netcdf_dimensions(&handle)?;
+    let variables = list_netcdf_variables(&handle)?
+        .iter()
+        .map(describe_netcdf_variable)
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(NetcdfMetadata {
         dimensions,
@@ -148,7 +214,12 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{read_netcdf_metadata, read_netcdf_variable_values};
+    use super::{
+        describe_netcdf_variable, list_netcdf_dimensions, list_netcdf_variables,
+        open_netcdf_dataset, read_netcdf_metadata, read_netcdf_variable,
+        read_netcdf_variable_values,
+    };
+    use crate::engine::{DatasetKind, DatasetRef};
 
     #[test]
     fn reads_netcdf_metadata_via_crate_binding() {
@@ -173,6 +244,28 @@ mod tests {
         let values = read_netcdf_variable_values(&file, "depth").expect("read values");
 
         assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn netcdf_binding_family_supports_open_list_describe_load() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file = create_sample_netcdf(temp_dir.path());
+        let dataset = DatasetRef {
+            path: file,
+            kind: DatasetKind::Netcdf,
+        };
+
+        let handle = open_netcdf_dataset(&dataset).expect("open netcdf handle");
+        let dimensions = list_netcdf_dimensions(&handle).expect("list dimensions");
+        let variables = list_netcdf_variables(&handle).expect("list variables");
+        let metadata = describe_netcdf_variable(&variables[0]).expect("describe variable");
+        let array = read_netcdf_variable(&variables[0]).expect("load variable");
+
+        assert_eq!(dimensions.len(), 2);
+        assert_eq!(variables[0].name, "depth");
+        assert_eq!(metadata.shape, vec![2, 3]);
+        assert_eq!(array.shape, vec![2, 3]);
+        assert_eq!(array.values.len(), 6);
     }
 
     fn create_sample_netcdf(dir: &Path) -> std::path::PathBuf {

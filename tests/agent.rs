@@ -18,6 +18,66 @@ fn provider_list_reports_supported_providers() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
     assert!(stdout.contains("Supported Providers:"));
     assert!(stdout.contains("- openai (api_key, configured=false)"));
+    assert!(stdout.contains("- lmstudio (none, configured=true)"));
+}
+
+#[test]
+fn provider_use_persists_default_provider_selection() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+
+    binary()
+        .current_dir(temp_dir.path())
+        .env("HOME", temp_dir.path())
+        .arg("provider")
+        .arg("use")
+        .arg("lmstudio")
+        .assert()
+        .success();
+
+    let config_file = temp_dir
+        .path()
+        .join(".config/geocode/default-provider.json");
+    assert!(config_file.exists());
+
+    let assert = binary()
+        .current_dir(temp_dir.path())
+        .env("HOME", temp_dir.path())
+        .arg("provider")
+        .arg("status")
+        .arg("lmstudio")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert!(stdout.contains("Default: true"));
+}
+
+#[test]
+fn provider_set_model_persists_selected_model() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+
+    binary()
+        .current_dir(temp_dir.path())
+        .env("HOME", temp_dir.path())
+        .arg("provider")
+        .arg("set-model")
+        .arg("lmstudio")
+        .arg("qwen/qwen3.5-9b")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Stored model"));
+
+    let assert = binary()
+        .current_dir(temp_dir.path())
+        .env("HOME", temp_dir.path())
+        .arg("provider")
+        .arg("status")
+        .arg("lmstudio")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert!(stdout.contains("Model: qwen/qwen3.5-9b"));
 }
 
 #[test]
@@ -77,13 +137,12 @@ fn ask_fails_cleanly_when_openai_is_not_configured() {
         .current_dir(temp_dir.path())
         .env("HOME", temp_dir.path())
         .env_remove("OPENAI_API_KEY")
+        .env("LMSTUDIO_BASE_URL", "http://127.0.0.1:9/v1")
         .arg("ask")
         .arg("show all variables in base.nc")
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "OpenAI is not configured. Set OPENAI_API_KEY or run `geocode provider set-api-key openai --stdin` to enable `geocode ask`.",
-        ));
+        .stderr(predicate::str::contains("Thinking..."));
 }
 
 #[test]
@@ -94,6 +153,7 @@ fn ask_with_selected_files_still_fails_cleanly_when_unconfigured() {
         .current_dir(temp_dir.path())
         .env("HOME", temp_dir.path())
         .env_remove("OPENAI_API_KEY")
+        .env("LMSTUDIO_BASE_URL", "http://127.0.0.1:9/v1")
         .arg("ask")
         .arg("--file")
         .arg("base.nc")
@@ -102,9 +162,27 @@ fn ask_with_selected_files_still_fails_cleanly_when_unconfigured() {
         .arg("compare these")
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "OpenAI is not configured. Set OPENAI_API_KEY or run `geocode provider set-api-key openai --stdin` to enable `geocode ask`.",
-        ));
+        .stderr(predicate::str::contains("Thinking..."));
+}
+
+#[test]
+fn provider_status_reports_lmstudio_defaults() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+
+    let assert = binary()
+        .current_dir(temp_dir.path())
+        .env("HOME", temp_dir.path())
+        .arg("provider")
+        .arg("status")
+        .arg("lmstudio")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert!(stdout.contains("Provider: lmstudio"));
+    assert!(stdout.contains("Auth Method: none"));
+    assert!(stdout.contains("Configured: true"));
+    assert!(stdout.contains("Model: qwen/qwen3.5-9b"));
 }
 
 #[test]

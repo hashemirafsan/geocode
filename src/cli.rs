@@ -50,8 +50,26 @@ pub struct ProviderArgs {
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommand {
     List,
-    Status,
+    Status(ProviderStatusArgs),
+    Use(ProviderUseArgs),
+    SetModel(SetModelArgs),
     SetApiKey(SetApiKeyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProviderStatusArgs {
+    pub provider: Option<ProviderKind>,
+}
+
+#[derive(Debug, Args)]
+pub struct ProviderUseArgs {
+    pub provider: ProviderKind,
+}
+
+#[derive(Debug, Args)]
+pub struct SetModelArgs {
+    pub provider: ProviderKind,
+    pub model: String,
 }
 
 #[derive(Debug, Args)]

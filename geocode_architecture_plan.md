@@ -246,18 +246,19 @@ geocode/
 │   ├── main.rs
 │   ├── cli.rs
 │   ├── app.rs
-│   ├── engine.rs
 │   ├── output.rs
-│   ├── tools.rs                # existing deterministic dataset wrappers
-│   ├── capability.rs           # registry + discovered planner surface
-│   ├── plan.rs                 # JSON-compatible plan IR
-│   ├── executor.rs             # typed value store + plan executor
-│   ├── runtime.rs              # host discovery + known binary bindings
-│   ├── policy.rs               # curated host policy guard
-│   ├── provider.rs             # provider config + planner client abstraction
-│   ├── session.rs              # session state and store
-│   ├── memory.rs               # turn/session/persistent memory scaffolding
-│   └── agent.rs                # planner request/response + plan normalization
+│   ├── agent/
+│   ├── bindings/
+│   ├── capability/
+│   ├── engine/
+│   ├── executor/
+│   ├── memory/
+│   ├── plan/
+│   ├── policy/
+│   ├── provider/
+│   ├── runtime/
+│   ├── session/
+│   └── tools/
 ```
 
 Why this refinement:
@@ -265,6 +266,13 @@ Why this refinement:
 - introduces the missing runtime seams now
 - avoids a rewrite into deep empty folders too early
 - makes later extraction into submodules straightforward
+
+Current implementation status:
+- subtree split is complete for the runtime-facing modules
+- the capability inventory now lives in Rust code under `src/capability/catalog.rs`
+- direct commands already execute through typed plans and the executor
+- the first capability-native NetCDF slice is implemented around dataset open, dimension listing, variable describe/load, and stats mean
+- GeoTIFF still partially relies on a process-backed stats path for MVP parity
 
 ### Initial module responsibilities
 #### `cli`
@@ -490,6 +498,12 @@ Deliverables:
 - policy guard
 - provider client abstraction
 
+Current progress:
+- done: capability registry, typed value store, executor boundary, runtime discovery, policy guard, provider client abstraction
+- done: Rust-native capability catalog backing the registry
+- done: shared bindings subtree for dataset, NetCDF, GDAL, and curated process fallbacks
+- next: widen the executor and plan IR to support more core capabilities beyond the first NetCDF slice
+
 ### Milestone 4: Scoped Memory
 Goal:
 - improve follow-up accuracy through explicit, inspectable memory
@@ -574,6 +588,10 @@ Definition of done:
 - runtime exposes discovered capabilities rather than only a static tool menu
 - capability metadata includes implementation backing and typed input/output contracts
 - planner-visible capability surface is derived from the registry
+
+Status:
+- implemented in a narrow executable form
+- broader planned surface is cataloged in `src/capability/catalog.rs`
 
 #### `CORE-003` Define output rendering contract
 Definition of done:
@@ -794,6 +812,10 @@ Definition of done:
 - legacy intent-style responses can still be adapted during MVP transition
 - direct commands and agent mode share the same executor path where practical
 
+Status:
+- implemented for current inspect/mean/compare flows
+- further expansion is still needed for richer capability families and typed intermediate handles
+
 #### `AGENT-003` Add agent CLI entrypoint
 Definition of done:
 - CLI supports `geocode ask <query>` or `geocode chat`
@@ -935,6 +957,11 @@ Definition of done:
 - plan IR is JSON-compatible
 - steps reference typed capabilities instead of ad hoc tool names
 - intermediate references are explicit and validated before execution
+
+Status:
+- implemented for the current executor surface
+- partially expanded with dataset open and NetCDF-specific operations
+- still needs additional typed inputs and values for broader array/raster/query composition
 
 #### `PLAN-002` Add plan validation layer
 Definition of done:

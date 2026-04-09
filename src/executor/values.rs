@@ -3,9 +3,16 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::{
+    bindings::{ArrayValue, DatasetHandle, DimensionInfo, NetcdfVariableRef, VariableMetadata},
     engine::DatasetRef,
     tools::{CompareReport, InspectReport, MeanReport},
 };
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DescribedNetcdfVariable {
+    pub reference: NetcdfVariableRef,
+    pub metadata: VariableMetadata,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScalarValue {
@@ -34,6 +41,11 @@ pub struct TextValue {
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum RuntimeValue {
     DatasetRef(DatasetRef),
+    DatasetHandle(DatasetHandle),
+    NetcdfDimensions(Vec<DimensionInfo>),
+    NetcdfVariables(Vec<NetcdfVariableRef>),
+    VariableMetadata(DescribedNetcdfVariable),
+    ArrayValue(ArrayValue),
     InspectReport(InspectReport),
     MeanReport(MeanReport),
     CompareReport(CompareReport),

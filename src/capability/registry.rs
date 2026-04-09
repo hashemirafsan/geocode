@@ -42,6 +42,7 @@ impl CapabilityRegistry {
     pub fn planner_surface(&self) -> Vec<PlannerCapabilityDescriptor> {
         self.capabilities
             .iter()
+            .filter(|capability| capability.planner_visible)
             .map(|capability| PlannerCapabilityDescriptor {
                 id: capability.id,
                 summary: capability.summary.clone(),
@@ -93,6 +94,7 @@ fn descriptor_from_catalog(
         kind: entry.kind,
         input_type: entry.input_type.to_string(),
         output_type: entry.output_type.to_string(),
+        planner_visible: entry.planner_visible,
         bindings,
     })
 }
@@ -116,6 +118,15 @@ mod tests {
             .planner_surface()
             .iter()
             .any(|capability| capability.id == CapabilityId::DatasetResolve));
+    }
+
+    #[test]
+    fn planner_surface_hides_process_fallback_capabilities() {
+        let registry = CapabilityRegistry::discover();
+        assert!(!registry
+            .planner_surface()
+            .iter()
+            .any(|capability| capability.id == CapabilityId::ProcessRunKnown));
     }
 
     #[test]

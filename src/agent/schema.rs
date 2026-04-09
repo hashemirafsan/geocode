@@ -1,9 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    capability::{CapabilityId, CapabilityRegistry, PlannerCapabilityDescriptor},
+    capability::{CapabilityRegistry, PlannerCapabilityDescriptor},
     engine::DatasetKind,
-    plan::{CapabilityInput, ExecutionPlan, PlanStep, PlanValueRef},
+    plan::ExecutionPlan,
     session::SessionState,
     tools::detect_dataset_kind,
 };
@@ -55,6 +55,8 @@ pub fn build_request(
     session: &SessionState,
     registry: &CapabilityRegistry,
 ) -> PlannerRequest {
+    let include_session_goal = should_include_session_goal(&user_input, &selected_files);
+
     PlannerRequest {
         user_input,
         selected_files,
@@ -65,7 +67,11 @@ pub fn build_request(
                 .as_ref()
                 .map(|path| path.display().to_string()),
             last_variable: session.last_variable.clone(),
-            current_goal: session.current_goal.clone(),
+            current_goal: if include_session_goal {
+                session.current_goal.clone()
+            } else {
+                None
+            },
             aliases: session
                 .aliases
                 .iter()
@@ -155,7 +161,22 @@ pub(crate) fn normalize_planner_response(
         return response;
     }
 
-    response.plan = build_plan(request, &response);
+    if response.plan.is_none() && !response.requires_clarification {
+        response.requires_clarification = true;
+        if response.clarification_question.is_none() {
+            response.clarification_question = Some(
+                "I could not build a valid execution plan from the current response. Please restate the request more explicitly with the dataset target and variable if needed."
+                    .to_string(),
+            );
+        }
+    }
+
+    if let Some(plan) = response.plan.as_mut() {
+        if plan.goal.trim().is_empty() {
+            plan.goal = request.user_input.clone();
+        }
+    }
+
     if response.tool_ids.is_empty() {
         response.tool_ids = response
             .plan
@@ -170,93 +191,6 @@ pub(crate) fn normalize_planner_response(
     }
 
     response
-}
-
-fn build_plan(request: &PlannerRequest, response: &PlannerResponse) -> Option<ExecutionPlan> {
-    if response.requires_clarification {
-        return None;
-    }
-
-    let files = if response.target_files.is_empty() {
-        request.selected_files.clone()
-    } else {
-        response.target_files.clone()
-    };
-
-    match response.intent {
-        AgentIntent::Inspect if files.len() == 1 => Some(ExecutionPlan {
-            goal: request.user_input.clone(),
-            steps: vec![
-                PlanStep {
-                    id: "s1".to_string(),
-                    capability: CapabilityId::DatasetResolve,
-                    input: CapabilityInput::DatasetResolve {
-                        alias: None,
-                        path: Some(files[0].clone()),
-                    },
-                },
-                PlanStep {
-                    id: "s2".to_string(),
-                    capability: CapabilityId::DatasetInspect,
-                    input: CapabilityInput::DatasetInspect {
-                        dataset: PlanValueRef::step("s1"),
-                    },
-                },
-            ],
-        }),
-        AgentIntent::Mean if files.len() == 1 => Some(ExecutionPlan {
-            goal: request.user_input.clone(),
-            steps: vec![
-                PlanStep {
-                    id: "s1".to_string(),
-                    capability: CapabilityId::DatasetResolve,
-                    input: CapabilityInput::DatasetResolve {
-                        alias: None,
-                        path: Some(files[0].clone()),
-                    },
-                },
-                PlanStep {
-                    id: "s2".to_string(),
-                    capability: CapabilityId::StatsMean,
-                    input: CapabilityInput::StatsMean {
-                        dataset: PlanValueRef::step("s1"),
-                        variable: response.variable.clone(),
-                    },
-                },
-            ],
-        }),
-        AgentIntent::Compare if files.len() == 2 => Some(ExecutionPlan {
-            goal: request.user_input.clone(),
-            steps: vec![
-                PlanStep {
-                    id: "s1".to_string(),
-                    capability: CapabilityId::DatasetResolve,
-                    input: CapabilityInput::DatasetResolve {
-                        alias: None,
-                        path: Some(files[0].clone()),
-                    },
-                },
-                PlanStep {
-                    id: "s2".to_string(),
-                    capability: CapabilityId::DatasetResolve,
-                    input: CapabilityInput::DatasetResolve {
-                        alias: None,
-                        path: Some(files[1].clone()),
-                    },
-                },
-                PlanStep {
-                    id: "s3".to_string(),
-                    capability: CapabilityId::CompareMeanDelta,
-                    input: CapabilityInput::CompareMeanDelta {
-                        left: PlanValueRef::step("s1"),
-                        right: PlanValueRef::step("s2"),
-                        variable: response.variable.clone(),
-                    },
-                },
-            ],
-        }),
-        _ => None,
-    }
 }
 
 fn query_mentions_variables(input: &str) -> bool {
@@ -294,7 +228,18 @@ fn unsupported_scope_response() -> PlannerResponse {
     }
 }
 
-fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+fn should_include_session_goal(user_input: &str, selected_files: &[String]) -> bool {
+    if !selected_files.is_empty() {
+        return false;
+    }
+
+    let input = user_input.to_ascii_lowercase();
+    ["that", "those", "same", "previous", "again", "it", "them"]
+        .iter()
+        .any(|token| input.split_whitespace().any(|word| word == *token))
+}
+
+pub(crate) fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -316,9 +261,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        build_request, AgentIntent, PlannerRequest, PlannerResponse, PlannerSessionContext,
+        build_request, normalize_planner_response, AgentIntent, PlannerRequest, PlannerResponse,
+        PlannerSessionContext,
     };
-    use crate::{capability::CapabilityRegistry, session::SessionState};
+    use crate::{
+        capability::{CapabilityId, CapabilityRegistry},
+        plan::{CapabilityInput, ExecutionPlan, PlanStep, PlanValueRef},
+        session::SessionState,
+    };
 
     #[test]
     fn planner_response_accepts_string_target_files() {
@@ -416,9 +366,9 @@ mod tests {
             plan: None,
         };
 
-        let normalized = super::normalize_planner_response(&request, response);
+        let normalized = normalize_planner_response(&request, response);
         assert_eq!(normalized.target_files, vec!["base.nc"]);
-        assert!(normalized.plan.is_some());
+        assert_eq!(normalized.target_files, vec!["base.nc"]);
     }
 
     #[test]
@@ -445,9 +395,106 @@ mod tests {
             plan: None,
         };
 
-        let normalized = super::normalize_planner_response(&request, response);
+        let normalized = normalize_planner_response(&request, response);
         assert!(matches!(normalized.intent, AgentIntent::Unknown));
         assert!(normalized.requires_clarification);
         assert!(normalized.tool_ids.is_empty());
+    }
+
+    #[test]
+    fn normalize_preserves_planner_authored_plan() {
+        let request = PlannerRequest {
+            user_input: "show variables".to_string(),
+            selected_files: vec!["base.nc".to_string()],
+            session: PlannerSessionContext {
+                session_id: None,
+                workspace_path: None,
+                last_variable: None,
+                current_goal: None,
+                aliases: Vec::new(),
+            },
+            available_capabilities: Vec::new(),
+        };
+        let authored_plan = ExecutionPlan {
+            goal: "show variables".to_string(),
+            steps: vec![
+                PlanStep {
+                    id: "s1".to_string(),
+                    capability: CapabilityId::DatasetResolve,
+                    input: CapabilityInput::DatasetResolve {
+                        alias: None,
+                        path: Some("base.nc".to_string()),
+                    },
+                },
+                PlanStep {
+                    id: "s2".to_string(),
+                    capability: CapabilityId::DatasetOpen,
+                    input: CapabilityInput::DatasetOpen {
+                        dataset: PlanValueRef::step("s1"),
+                    },
+                },
+            ],
+        };
+        let response = PlannerResponse {
+            intent: AgentIntent::Inspect,
+            target_files: vec!["base.nc".to_string()],
+            variable: None,
+            tool_ids: Vec::new(),
+            requires_clarification: false,
+            clarification_question: None,
+            plan: Some(authored_plan.clone()),
+        };
+
+        let normalized = normalize_planner_response(&request, response);
+        assert_eq!(
+            normalized.plan.expect("plan").steps.len(),
+            authored_plan.steps.len()
+        );
+        assert_eq!(normalized.tool_ids, vec!["dataset.resolve", "dataset.open"]);
+    }
+
+    #[test]
+    fn missing_plan_becomes_generic_clarification() {
+        let request = PlannerRequest {
+            user_input: "inspect this file".to_string(),
+            selected_files: vec!["base.nc".to_string()],
+            session: PlannerSessionContext {
+                session_id: None,
+                workspace_path: None,
+                last_variable: None,
+                current_goal: None,
+                aliases: Vec::new(),
+            },
+            available_capabilities: Vec::new(),
+        };
+        let response = PlannerResponse {
+            intent: AgentIntent::Inspect,
+            target_files: vec!["base.nc".to_string()],
+            variable: None,
+            tool_ids: Vec::new(),
+            requires_clarification: false,
+            clarification_question: None,
+            plan: None,
+        };
+
+        let normalized = normalize_planner_response(&request, response);
+        assert!(normalized.requires_clarification);
+        assert!(normalized.plan.is_none());
+    }
+
+    #[test]
+    fn explicit_file_request_does_not_carry_stale_session_goal() {
+        let registry = CapabilityRegistry::discover();
+        let mut session = SessionState::default();
+        session.current_goal = Some("old goal".to_string());
+
+        let request = build_request(
+            "Average Water depth Query (using depth column)".to_string(),
+            vec!["base.nc".to_string()],
+            &session,
+            &registry,
+        );
+
+        assert!(request.session.current_goal.is_none());
     }
 }

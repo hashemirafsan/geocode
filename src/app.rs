@@ -17,6 +17,7 @@ use crate::{
     policy::ExecutionPolicy,
     provider::{supported_providers, ProviderKind, ProviderStatus, ProviderStore},
     session::{CachedResultSummary, RecentTurn, SessionState, SessionStore},
+    tools,
 };
 
 pub fn run(cli: cli::Cli) -> Result<(), ExecutionError> {
@@ -77,26 +78,7 @@ fn execute_inspect(
     session: &mut SessionState,
 ) -> Result<CommandResponse, ExecutionError> {
     persist_workspace(&file, session);
-    let plan = ExecutionPlan {
-        goal: format!("Inspect dataset metadata for {}", file.display()),
-        steps: vec![
-            PlanStep {
-                id: "s1".to_string(),
-                capability: crate::capability::CapabilityId::DatasetResolve,
-                input: CapabilityInput::DatasetResolve {
-                    alias: None,
-                    path: Some(file.display().to_string()),
-                },
-            },
-            PlanStep {
-                id: "s2".to_string(),
-                capability: crate::capability::CapabilityId::DatasetInspect,
-                input: CapabilityInput::DatasetInspect {
-                    dataset: PlanValueRef::step("s1"),
-                },
-            },
-        ],
-    };
+    let plan = build_inspect_plan(&file)?;
     let outcome = execute_plan(&plan, registry, policy, session)?;
 
     match outcome.final_value() {
@@ -141,27 +123,7 @@ fn execute_mean(
     session: &mut SessionState,
 ) -> Result<CommandResponse, ExecutionError> {
     persist_workspace(&file, session);
-    let plan = ExecutionPlan {
-        goal: format!("Compute mean for {}", file.display()),
-        steps: vec![
-            PlanStep {
-                id: "s1".to_string(),
-                capability: crate::capability::CapabilityId::DatasetResolve,
-                input: CapabilityInput::DatasetResolve {
-                    alias: None,
-                    path: Some(file.display().to_string()),
-                },
-            },
-            PlanStep {
-                id: "s2".to_string(),
-                capability: crate::capability::CapabilityId::StatsMean,
-                input: CapabilityInput::StatsMean {
-                    dataset: PlanValueRef::step("s1"),
-                    variable: var.clone(),
-                },
-            },
-        ],
-    };
+    let plan = build_mean_plan(&file, var.clone())?;
     let outcome = execute_plan(&plan, registry, policy, session)?;
 
     match outcome.final_value() {
@@ -185,8 +147,32 @@ fn execute_mean(
                     .map_err(|err| ExecutionError::Output(err.to_string()))?,
             })
         }
+        Some(RuntimeValue::ScalarValue(value)) => {
+            let kind = tools::detect_dataset_kind(&file)?;
+            let report = crate::tools::MeanReport {
+                file: file.clone(),
+                kind,
+                variable: var.clone(),
+                mean: value.value,
+                nodata: None,
+            };
+            session.last_variable = report.variable.clone();
+            let summary = format!(
+                "Computed NetCDF mean for {} in {}",
+                report.variable.as_deref().unwrap_or("<unknown>"),
+                file.display()
+            );
+            record_turn(session, &summary, &plan.goal, kind);
+            Ok(CommandResponse {
+                command: "mean",
+                summary,
+                dataset_kind: Some(kind),
+                details: serde_json::to_value(report)
+                    .map_err(|err| ExecutionError::Output(err.to_string()))?,
+            })
+        }
         _ => Err(ExecutionError::Plan(
-            "mean plan did not produce a mean report".into(),
+            "mean plan did not produce a mean result".into(),
         )),
     }
 }
@@ -326,12 +312,7 @@ fn handle_ask(
     policy: &ExecutionPolicy,
     session: &mut SessionState,
 ) -> Result<(CommandResponse, bool), ExecutionError> {
-    let provider = ProviderStatus::current(ProviderKind::OpenAi)?;
-    if !provider.config.configured {
-        return Err(ExecutionError::ProviderNotConfigured(
-            "OpenAI is not configured. Set OPENAI_API_KEY or run `geocode provider set-api-key openai --stdin` to enable `geocode ask`.".into(),
-        ));
-    }
+    let provider = select_ask_provider()?;
 
     let selected_files = args
         .files
@@ -339,10 +320,12 @@ fn handle_ask(
         .map(|path| path.display().to_string())
         .collect();
     let request = agent::build_request(args.query.clone(), selected_files, session, registry);
+    eprintln!("Thinking...");
     let planner_response = agent::plan_with_provider(&request, &provider.config)?;
 
     if !planner_response.requires_clarification {
         if let Some(plan) = planner_response.plan.as_ref() {
+            eprintln!("Executing capability plan...");
             if let Some(executed) = execute_agent_plan(plan, registry, policy, session)? {
                 return Ok((executed, true));
             }
@@ -378,14 +361,19 @@ fn execute_agent_plan(
     session: &mut SessionState,
 ) -> Result<Option<CommandResponse>, ExecutionError> {
     let outcome = execute_plan(plan, registry, policy, session)?;
+    let trace = serde_json::to_value(&outcome.trace)
+        .map_err(|err| ExecutionError::Output(err.to_string()))?;
 
     match outcome.final_value() {
         Some(RuntimeValue::InspectReport(report)) => Ok(Some(CommandResponse {
             command: "inspect",
             summary: format!("Inspected {} via capability plan", report.file.display()),
             dataset_kind: Some(report.kind),
-            details: serde_json::to_value(report)
-                .map_err(|err| ExecutionError::Output(err.to_string()))?,
+            details: with_trace(
+                serde_json::to_value(report)
+                    .map_err(|err| ExecutionError::Output(err.to_string()))?,
+                trace.clone(),
+            ),
         })),
         Some(RuntimeValue::MeanReport(report)) => Ok(Some(CommandResponse {
             command: "mean",
@@ -394,8 +382,11 @@ fn execute_agent_plan(
                 report.file.display()
             ),
             dataset_kind: Some(report.kind),
-            details: serde_json::to_value(report)
-                .map_err(|err| ExecutionError::Output(err.to_string()))?,
+            details: with_trace(
+                serde_json::to_value(report)
+                    .map_err(|err| ExecutionError::Output(err.to_string()))?,
+                trace.clone(),
+            ),
         })),
         Some(RuntimeValue::CompareReport(report)) => Ok(Some(CommandResponse {
             command: "compare",
@@ -405,8 +396,31 @@ fn execute_agent_plan(
                 report.file_b.display()
             ),
             dataset_kind: Some(report.kind),
-            details: serde_json::to_value(report)
-                .map_err(|err| ExecutionError::Output(err.to_string()))?,
+            details: with_trace(
+                serde_json::to_value(report)
+                    .map_err(|err| ExecutionError::Output(err.to_string()))?,
+                trace,
+            ),
+        })),
+        Some(RuntimeValue::ScalarValue(value)) => Ok(Some(CommandResponse {
+            command: "ask_result",
+            summary: value.label.clone(),
+            dataset_kind: None,
+            details: serde_json::json!({
+                "label": value.label,
+                "value": value.value,
+                "capability_trace": trace,
+            }),
+        })),
+        Some(RuntimeValue::TableValue(value)) => Ok(Some(CommandResponse {
+            command: "ask_result",
+            summary: value.title.clone(),
+            dataset_kind: None,
+            details: serde_json::json!({
+                "title": value.title,
+                "rows": value.rows,
+                "capability_trace": trace,
+            }),
         })),
         _ => Ok(None),
     }
@@ -419,6 +433,135 @@ fn execute_plan(
     session: &mut SessionState,
 ) -> Result<crate::executor::ExecutionOutcome, ExecutionError> {
     PlanExecutor::new(registry.clone(), policy.clone()).execute(plan, session)
+}
+
+fn build_inspect_plan(file: &PathBuf) -> Result<ExecutionPlan, ExecutionError> {
+    let kind = tools::detect_dataset_kind(file)?;
+    let mut steps = vec![PlanStep {
+        id: "s1".to_string(),
+        capability: crate::capability::CapabilityId::DatasetResolve,
+        input: CapabilityInput::DatasetResolve {
+            alias: None,
+            path: Some(file.display().to_string()),
+        },
+    }];
+
+    if matches!(kind, DatasetKind::Netcdf) {
+        steps.push(PlanStep {
+            id: "s2".to_string(),
+            capability: crate::capability::CapabilityId::DatasetOpen,
+            input: CapabilityInput::DatasetOpen {
+                dataset: PlanValueRef::step("s1"),
+            },
+        });
+        steps.push(PlanStep {
+            id: "s3".to_string(),
+            capability: crate::capability::CapabilityId::NetcdfDimensionList,
+            input: CapabilityInput::NetcdfDimensionList {
+                dataset: PlanValueRef::step("s2"),
+            },
+        });
+        steps.push(PlanStep {
+            id: "s4".to_string(),
+            capability: crate::capability::CapabilityId::NetcdfVariableList,
+            input: CapabilityInput::NetcdfVariableList {
+                dataset: PlanValueRef::step("s2"),
+            },
+        });
+        steps.push(PlanStep {
+            id: "s5".to_string(),
+            capability: crate::capability::CapabilityId::DatasetInspect,
+            input: CapabilityInput::DatasetInspect {
+                dataset: PlanValueRef::step("s1"),
+            },
+        });
+    } else {
+        steps.push(PlanStep {
+            id: "s2".to_string(),
+            capability: crate::capability::CapabilityId::DatasetInspect,
+            input: CapabilityInput::DatasetInspect {
+                dataset: PlanValueRef::step("s1"),
+            },
+        });
+    }
+
+    Ok(ExecutionPlan {
+        goal: format!("Inspect dataset metadata for {}", file.display()),
+        steps,
+    })
+}
+
+fn build_mean_plan(file: &PathBuf, var: Option<String>) -> Result<ExecutionPlan, ExecutionError> {
+    let kind = tools::detect_dataset_kind(file)?;
+    if matches!(kind, DatasetKind::Netcdf) {
+        let variable = var.ok_or(ExecutionError::MissingVariable)?;
+        Ok(ExecutionPlan {
+            goal: format!("Compute mean for {}", file.display()),
+            steps: vec![
+                PlanStep {
+                    id: "s1".to_string(),
+                    capability: crate::capability::CapabilityId::DatasetResolve,
+                    input: CapabilityInput::DatasetResolve {
+                        alias: None,
+                        path: Some(file.display().to_string()),
+                    },
+                },
+                PlanStep {
+                    id: "s2".to_string(),
+                    capability: crate::capability::CapabilityId::DatasetOpen,
+                    input: CapabilityInput::DatasetOpen {
+                        dataset: PlanValueRef::step("s1"),
+                    },
+                },
+                PlanStep {
+                    id: "s3".to_string(),
+                    capability: crate::capability::CapabilityId::NetcdfVariableDescribe,
+                    input: CapabilityInput::NetcdfVariableDescribe {
+                        dataset: PlanValueRef::step("s2"),
+                        name: variable.clone(),
+                    },
+                },
+                PlanStep {
+                    id: "s4".to_string(),
+                    capability: crate::capability::CapabilityId::NetcdfVariableLoad,
+                    input: CapabilityInput::NetcdfVariableLoad {
+                        dataset: PlanValueRef::step("s2"),
+                        name: variable.clone(),
+                    },
+                },
+                PlanStep {
+                    id: "s5".to_string(),
+                    capability: crate::capability::CapabilityId::StatsMean,
+                    input: CapabilityInput::StatsMean {
+                        input: PlanValueRef::step("s4"),
+                        variable: Some(variable),
+                    },
+                },
+            ],
+        })
+    } else {
+        Ok(ExecutionPlan {
+            goal: format!("Compute mean for {}", file.display()),
+            steps: vec![
+                PlanStep {
+                    id: "s1".to_string(),
+                    capability: crate::capability::CapabilityId::DatasetResolve,
+                    input: CapabilityInput::DatasetResolve {
+                        alias: None,
+                        path: Some(file.display().to_string()),
+                    },
+                },
+                PlanStep {
+                    id: "s2".to_string(),
+                    capability: crate::capability::CapabilityId::StatsMean,
+                    input: CapabilityInput::StatsMean {
+                        input: PlanValueRef::step("s1"),
+                        variable: None,
+                    },
+                },
+            ],
+        })
+    }
 }
 
 fn record_turn(session: &mut SessionState, outcome: &str, goal: &str, kind: DatasetKind) {
@@ -439,6 +582,13 @@ fn persist_workspace(file: &PathBuf, session: &mut SessionState) {
     }
 }
 
+fn with_trace(mut details: serde_json::Value, trace: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = details.as_object_mut() {
+        object.insert("capability_trace".to_string(), trace);
+    }
+    details
+}
+
 fn handle_provider(args: cli::ProviderArgs) -> Result<(CommandResponse, bool), ExecutionError> {
     match args.command {
         cli::ProviderCommand::List => {
@@ -453,8 +603,8 @@ fn handle_provider(args: cli::ProviderArgs) -> Result<(CommandResponse, bool), E
                 false,
             ))
         }
-        cli::ProviderCommand::Status => {
-            let status = ProviderStatus::current(ProviderKind::OpenAi)?;
+        cli::ProviderCommand::Status(args) => {
+            let status = ProviderStatus::current(args.provider.unwrap_or(ProviderKind::OpenAi))?;
             Ok((
                 CommandResponse {
                     command: "provider_status",
@@ -466,7 +616,53 @@ fn handle_provider(args: cli::ProviderArgs) -> Result<(CommandResponse, bool), E
                 false,
             ))
         }
+        cli::ProviderCommand::Use(args) => {
+            let store = ProviderStore::new();
+            store.save_default_provider(args.provider)?;
+            let status = ProviderStatus::current(args.provider)?;
+
+            Ok((
+                CommandResponse {
+                    command: "provider_use",
+                    summary: format!("Selected {:?} as the default provider", args.provider),
+                    dataset_kind: None,
+                    details: serde_json::json!({
+                        "provider": status,
+                        "default_provider_path": store.default_provider_path(),
+                    }),
+                },
+                false,
+            ))
+        }
+        cli::ProviderCommand::SetModel(args) => {
+            let store = ProviderStore::new();
+            let mut config = store.load(args.provider)?.unwrap_or_default();
+            config.model = Some(args.model.clone());
+            store.save(args.provider, &config)?;
+            let status = ProviderStatus::current(args.provider)?;
+
+            Ok((
+                CommandResponse {
+                    command: "provider_set_model",
+                    summary: format!("Stored model for {:?}", args.provider),
+                    dataset_kind: None,
+                    details: serde_json::json!({
+                        "provider_name": args.provider,
+                        "model": args.model,
+                        "path": store.path(args.provider),
+                        "provider": status,
+                    }),
+                },
+                false,
+            ))
+        }
         cli::ProviderCommand::SetApiKey(args) => {
+            if matches!(args.provider, ProviderKind::LmStudio) {
+                return Err(ExecutionError::InvalidInput(
+                    "LM Studio does not require an API key; configure LMSTUDIO_BASE_URL or use the default local endpoint instead.".into(),
+                ));
+            }
+
             let api_key = if let Some(api_key) = args.api_key {
                 api_key
             } else if args.stdin {
@@ -512,6 +708,30 @@ fn read_api_key_from_stdin() -> Result<String, ExecutionError> {
         ExecutionError::Provider(format!("failed to read api key from stdin: {err}"))
     })?;
     Ok(buffer)
+}
+
+fn select_ask_provider() -> Result<ProviderStatus, ExecutionError> {
+    let store = ProviderStore::new();
+    if let Some(provider) = store.default_provider()? {
+        let selected = ProviderStatus::current(provider)?;
+        if selected.config.configured {
+            return Ok(selected);
+        }
+    }
+
+    let openai = ProviderStatus::current(ProviderKind::OpenAi)?;
+    if openai.config.configured {
+        return Ok(openai);
+    }
+
+    let lmstudio = ProviderStatus::current(ProviderKind::LmStudio)?;
+    if lmstudio.config.configured {
+        return Ok(lmstudio);
+    }
+
+    Err(ExecutionError::ProviderNotConfigured(
+        "No planner provider is configured. Set OPENAI_API_KEY or run a local LM Studio server at LMSTUDIO_BASE_URL (default: http://127.0.0.1:1234/v1).".into(),
+    ))
 }
 
 impl From<ExecutionResult> for CommandResponse {

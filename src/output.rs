@@ -30,13 +30,52 @@ fn render_text(response: &CommandResponse) -> String {
         "mean" => render_mean(response),
         "compare" => render_compare(response),
         "ask" => render_ask(response),
+        "ask_result" => render_ask_result(response),
         "provider_list" => render_provider_list(response),
         "provider_status" => render_provider_status(response),
+        "provider_set_model" => render_provider_set_model(response),
         "provider_set_api_key" => render_provider_set_api_key(response),
         "session_show" => render_session_show(response),
         "session_clear" => render_session_clear(response),
         _ => response.summary.clone(),
     }
+}
+
+fn render_provider_set_model(response: &CommandResponse) -> String {
+    let provider = display_provider_name(
+        response.details["provider_name"]
+            .as_str()
+            .unwrap_or("unknown"),
+    );
+    let model = response.details["model"].as_str().unwrap_or("<unknown>");
+    let path = response.details["path"].as_str().unwrap_or("<unknown>");
+
+    format!("Stored model\nProvider: {provider}\nModel: {model}\nConfig Path: {path}")
+}
+
+fn render_ask_result(response: &CommandResponse) -> String {
+    if let Some(value) = response.details["value"].as_f64() {
+        let label = response.details["label"].as_str().unwrap_or("Result");
+        return append_capability_trace(response, format!("{label}: {value:.6}"));
+    }
+
+    if let Some(rows) = response.details["rows"].as_array() {
+        let title = response.details["title"].as_str().unwrap_or("Result");
+        let body = rows
+            .iter()
+            .filter_map(|row| {
+                Some(format!(
+                    "- {}: {}",
+                    row["label"].as_str()?,
+                    row["value"].as_str()?
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return append_capability_trace(response, format!("{title}\n{body}"));
+    }
+
+    response.summary.clone()
 }
 
 fn render_provider_set_api_key(response: &CommandResponse) -> String {
@@ -69,7 +108,9 @@ fn render_provider_list(response: &CommandResponse) -> String {
                         display_provider_name(provider["provider"].as_str().unwrap_or("unknown"));
                     let auth_method = provider["auth_method"].as_str().unwrap_or("unknown");
                     let configured = provider["configured"].as_bool().unwrap_or(false);
-                    format!("- {name} ({auth_method}, configured={configured})")
+                    let default = provider["default"].as_bool().unwrap_or(false);
+                    let suffix = if default { ", default=true" } else { "" };
+                    format!("- {name} ({auth_method}, configured={configured}{suffix})")
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -167,15 +208,17 @@ fn render_provider_status(response: &CommandResponse) -> String {
     let credential_source = response.details["credential_source"]
         .as_str()
         .unwrap_or("unknown");
+    let is_default = response.details["is_default"].as_bool().unwrap_or(false);
 
     format!(
-        "Provider: {provider}\nAuth Method: {auth_method}\nConfigured: {configured}\nModel: {model}\nBase URL: {base_url}\nAPI Key Env Var: {env_var}\nConfig Path: {config_path}\nCredential Source: {credential_source}"
+        "Provider: {provider}\nAuth Method: {auth_method}\nConfigured: {configured}\nDefault: {is_default}\nModel: {model}\nBase URL: {base_url}\nAPI Key Env Var: {env_var}\nConfig Path: {config_path}\nCredential Source: {credential_source}"
     )
 }
 
 fn display_provider_name(name: &str) -> &str {
     match name {
         "open_ai" => "openai",
+        "lm_studio" => "lmstudio",
         other => other,
     }
 }
@@ -219,8 +262,11 @@ fn render_compare(response: &CommandResponse) -> String {
     match kind {
         "netcdf" => {
             let variable = response.details["variable"].as_str().unwrap_or("<unknown>");
-            format!(
+            append_capability_trace(
+                response,
+                format!(
                 "File A: {file_a}\nFile B: {file_b}\nType: netcdf\nVariable: {variable}\nMean A: {mean_a:.6}\nMean B: {mean_b:.6}\nDifference (B - A): {difference:.6}"
+                ),
             )
         }
         "geotiff" => {
@@ -241,7 +287,7 @@ fn render_compare(response: &CommandResponse) -> String {
                 lines.push(format!("Nodata B: {nodata_b}"));
             }
 
-            lines.join("\n")
+            append_capability_trace(response, lines.join("\n"))
         }
         _ => response.summary.clone(),
     }
@@ -262,13 +308,20 @@ fn render_mean(response: &CommandResponse) -> String {
     match kind {
         "netcdf" => {
             let variable = response.details["variable"].as_str().unwrap_or("<unknown>");
-            format!("File: {file}\nType: netcdf\nVariable: {variable}\nMean: {mean:.6}")
+            append_capability_trace(
+                response,
+                format!("File: {file}\nType: netcdf\nVariable: {variable}\nMean: {mean:.6}"),
+            )
         }
         "geotiff" => match response.details["nodata"].as_f64() {
-            Some(nodata) => {
-                format!("File: {file}\nType: geotiff\nMean: {mean:.6}\nNodata: {nodata}")
-            }
-            None => format!("File: {file}\nType: geotiff\nMean: {mean:.6}"),
+            Some(nodata) => append_capability_trace(
+                response,
+                format!("File: {file}\nType: geotiff\nMean: {mean:.6}\nNodata: {nodata}"),
+            ),
+            None => append_capability_trace(
+                response,
+                format!("File: {file}\nType: geotiff\nMean: {mean:.6}"),
+            ),
         },
         _ => response.summary.clone(),
     }
@@ -286,9 +339,33 @@ fn render_inspect(response: &CommandResponse) -> String {
     let file = response.details["file"].as_str().unwrap_or("<unknown>");
 
     match kind {
-        "netcdf" => render_netcdf_inspect(file, &response.details),
-        "geotiff" => render_geotiff_inspect(file, &response.details),
+        "netcdf" => {
+            append_capability_trace(response, render_netcdf_inspect(file, &response.details))
+        }
+        "geotiff" => {
+            append_capability_trace(response, render_geotiff_inspect(file, &response.details))
+        }
         _ => response.summary.clone(),
+    }
+}
+
+fn append_capability_trace(response: &CommandResponse, body: String) -> String {
+    let trace = response.details["capability_trace"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .take(8)
+                .filter_map(|item| item["detail"].as_str())
+                .map(|detail| format!("- {detail}"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if trace.is_empty() {
+        body
+    } else {
+        format!("{body}\nCapability Trace:\n{}", trace.join("\n"))
     }
 }
 

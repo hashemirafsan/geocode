@@ -5,16 +5,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::ExecutionError;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     #[value(name = "openai")]
     OpenAi,
+    #[value(name = "lmstudio")]
+    LmStudio,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMethod {
+    None,
     ApiKey,
     OAuth,
 }
@@ -59,6 +62,24 @@ impl ProviderConfig {
                     base_url,
                 })
             }
+            ProviderKind::LmStudio => {
+                let model = env::var("LMSTUDIO_MODEL")
+                    .ok()
+                    .or_else(|| stored.as_ref().and_then(|config| config.model.clone()))
+                    .unwrap_or_else(|| "qwen/qwen3.5-9b".to_string());
+                let base_url = env::var("LMSTUDIO_BASE_URL")
+                    .ok()
+                    .or_else(|| stored.as_ref().and_then(|config| config.base_url.clone()))
+                    .unwrap_or_else(|| "http://127.0.0.1:1234/v1".to_string());
+
+                Ok(Self {
+                    provider,
+                    auth_method: AuthMethod::None,
+                    configured: !base_url.trim().is_empty(),
+                    model,
+                    base_url,
+                })
+            }
         }
     }
 
@@ -77,6 +98,7 @@ impl ProviderConfig {
                     .and_then(|config| config.api_key)
                     .filter(|key| !key.trim().is_empty()))
             }
+            ProviderKind::LmStudio => Ok(None),
         }
     }
 }
@@ -86,6 +108,7 @@ pub struct ProviderSummary {
     pub provider: ProviderKind,
     pub auth_method: AuthMethod,
     pub configured: bool,
+    pub default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +117,7 @@ pub struct ProviderStatus {
     pub api_key_env_var: &'static str,
     pub config_path: String,
     pub credential_source: &'static str,
+    pub is_default: bool,
 }
 
 impl ProviderStatus {
@@ -124,14 +148,26 @@ impl ProviderStatus {
                     api_key_env_var: "OPENAI_API_KEY",
                     config_path: store.path(provider).display().to_string(),
                     credential_source,
+                    is_default: store
+                        .default_provider()?
+                        .is_some_and(|selected| selected == provider),
                 })
             }
+            ProviderKind::LmStudio => Ok(Self {
+                config: ProviderConfig::resolve(provider)?,
+                api_key_env_var: "<none>",
+                config_path: store.path(provider).display().to_string(),
+                credential_source: "none",
+                is_default: store
+                    .default_provider()?
+                    .is_some_and(|selected| selected == provider),
+            }),
         }
     }
 }
 
 pub fn supported_providers() -> Result<Vec<ProviderSummary>, ExecutionError> {
-    let providers = [ProviderKind::OpenAi];
+    let providers = [ProviderKind::OpenAi, ProviderKind::LmStudio];
 
     providers
         .into_iter()
@@ -141,6 +177,7 @@ pub fn supported_providers() -> Result<Vec<ProviderSummary>, ExecutionError> {
                 provider,
                 auth_method: status.config.auth_method,
                 configured: status.config.configured,
+                default: status.is_default,
             })
         })
         .collect()
@@ -216,8 +253,59 @@ impl ProviderStore {
     pub fn path(&self, provider: ProviderKind) -> PathBuf {
         let filename = match provider {
             ProviderKind::OpenAi => "openai.json",
+            ProviderKind::LmStudio => "lmstudio.json",
         };
 
         self.base_dir.join(filename)
     }
+
+    pub fn default_provider_path(&self) -> PathBuf {
+        self.base_dir.join("default-provider.json")
+    }
+
+    pub fn default_provider(&self) -> Result<Option<ProviderKind>, ExecutionError> {
+        let path = self.default_provider_path();
+
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(&path).map_err(|err| {
+            ExecutionError::Provider(format!("failed to read default provider config: {err}"))
+        })?;
+
+        let config: DefaultProviderConfig = serde_json::from_str(&content).map_err(|err| {
+            ExecutionError::Provider(format!("failed to parse default provider config: {err}"))
+        })?;
+
+        Ok(Some(config.provider))
+    }
+
+    pub fn save_default_provider(&self, provider: ProviderKind) -> Result<(), ExecutionError> {
+        let path = self.default_provider_path();
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                ExecutionError::Provider(format!(
+                    "failed to create provider config directory: {err}"
+                ))
+            })?;
+        }
+
+        let content =
+            serde_json::to_string_pretty(&DefaultProviderConfig { provider }).map_err(|err| {
+                ExecutionError::Provider(format!(
+                    "failed to serialize default provider config: {err}"
+                ))
+            })?;
+
+        fs::write(&path, content).map_err(|err| {
+            ExecutionError::Provider(format!("failed to write default provider config: {err}"))
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DefaultProviderConfig {
+    provider: ProviderKind,
 }

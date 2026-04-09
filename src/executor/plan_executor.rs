@@ -3,9 +3,17 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::{
+    bindings::{
+        describe_netcdf_variable, list_netcdf_dimensions, list_netcdf_variables,
+        open_netcdf_dataset, read_netcdf_variable, ArrayValue, DatasetHandle, NetcdfDatasetHandle,
+        NetcdfVariableRef, RasterDatasetHandle,
+    },
     capability::CapabilityRegistry,
-    engine::{DatasetRef, ExecutionError, TraceEvent},
-    executor::values::{RuntimeValue, ScalarValue, TableRow, TableValue, TextValue, ValueStore},
+    engine::{DatasetKind, DatasetRef, ExecutionError, TraceEvent},
+    executor::values::{
+        DescribedNetcdfVariable, RuntimeValue, ScalarValue, TableRow, TableValue, TextValue,
+        ValueStore,
+    },
     plan::{CapabilityInput, ExecutionPlan, PlanValueRef},
     policy::ExecutionPolicy,
     runtime::{HostRuntime, KnownBinary},
@@ -65,16 +73,80 @@ impl PlanExecutor {
                 CapabilityInput::DatasetResolve { alias, path } => RuntimeValue::DatasetRef(
                     self.resolve_dataset(alias.as_deref(), path.as_deref(), session)?,
                 ),
+                CapabilityInput::DatasetOpen { dataset } => {
+                    let dataset = self.resolve_dataset_ref(dataset, &values, session)?;
+                    match dataset.kind {
+                        DatasetKind::Netcdf => RuntimeValue::DatasetHandle(DatasetHandle::Netcdf(
+                            open_netcdf_dataset(&dataset)?,
+                        )),
+                        DatasetKind::Geotiff => RuntimeValue::DatasetHandle(DatasetHandle::Raster(
+                            RasterDatasetHandle { dataset },
+                        )),
+                    }
+                }
                 CapabilityInput::DatasetInspect { dataset } => {
                     let dataset = self.resolve_dataset_ref(dataset, &values, session)?;
                     RuntimeValue::InspectReport(tools::inspect(Path::new(&dataset.path))?)
                 }
-                CapabilityInput::StatsMean { dataset, variable } => {
-                    let dataset = self.resolve_dataset_ref(dataset, &values, session)?;
-                    RuntimeValue::MeanReport(tools::mean(
-                        Path::new(&dataset.path),
-                        variable.as_deref(),
-                    )?)
+                CapabilityInput::NetcdfDimensionList { dataset } => {
+                    let handle = self.resolve_netcdf_dataset_handle(dataset, &values)?;
+                    RuntimeValue::NetcdfDimensions(list_netcdf_dimensions(&handle)?)
+                }
+                CapabilityInput::NetcdfVariableList { dataset } => {
+                    let handle = self.resolve_netcdf_dataset_handle(dataset, &values)?;
+                    RuntimeValue::NetcdfVariables(list_netcdf_variables(&handle)?)
+                }
+                CapabilityInput::NetcdfVariableDescribe { dataset, name } => {
+                    let handle = self.resolve_netcdf_dataset_handle(dataset, &values)?;
+                    let variable_ref = NetcdfVariableRef {
+                        dataset: handle,
+                        name: name.clone(),
+                    };
+                    RuntimeValue::VariableMetadata(DescribedNetcdfVariable {
+                        metadata: describe_netcdf_variable(&variable_ref)?,
+                        reference: variable_ref,
+                    })
+                }
+                CapabilityInput::NetcdfVariableLoad { dataset, name } => {
+                    let variable_ref =
+                        if let Ok(reference) = self.resolve_netcdf_variable_ref(dataset, &values) {
+                            reference
+                        } else {
+                            let handle = self.resolve_netcdf_dataset_handle(dataset, &values)?;
+                            NetcdfVariableRef {
+                                dataset: handle,
+                                name: name.clone(),
+                            }
+                        };
+                    RuntimeValue::ArrayValue(read_netcdf_variable(&variable_ref)?)
+                }
+                CapabilityInput::StatsMean { input, variable } => {
+                    if let Some(array) = self.resolve_array_value(input, &values)? {
+                        RuntimeValue::ScalarValue(ScalarValue {
+                            label: variable.clone().unwrap_or_else(|| "mean".to_string()),
+                            value: arithmetic_mean(&array.values)?,
+                        })
+                    } else {
+                        let dataset = self.resolve_dataset_target(input, &values, session)?;
+                        RuntimeValue::MeanReport(tools::mean(
+                            Path::new(&dataset.path),
+                            variable.as_deref(),
+                        )?)
+                    }
+                }
+                CapabilityInput::StatsMin { input, variable } => {
+                    let array = self.resolve_required_array_value(input, &values)?;
+                    RuntimeValue::ScalarValue(ScalarValue {
+                        label: variable.clone().unwrap_or_else(|| "min".to_string()),
+                        value: arithmetic_min(&array.values)?,
+                    })
+                }
+                CapabilityInput::StatsMax { input, variable } => {
+                    let array = self.resolve_required_array_value(input, &values)?;
+                    RuntimeValue::ScalarValue(ScalarValue {
+                        label: variable.clone().unwrap_or_else(|| "max".to_string()),
+                        value: arithmetic_max(&array.values)?,
+                    })
                 }
                 CapabilityInput::CompareMeanDelta {
                     left,
@@ -93,8 +165,8 @@ impl PlanExecutor {
                 CapabilityInput::RenderScalar { input, label } => {
                     RuntimeValue::ScalarValue(self.render_scalar(label, input, &values)?)
                 }
-                CapabilityInput::RenderTable { input, title } => {
-                    RuntimeValue::TableValue(self.render_table(title, input, &values)?)
+                CapabilityInput::RenderTable { inputs, title } => {
+                    RuntimeValue::TableValue(self.render_table(title, inputs, &values)?)
                 }
                 CapabilityInput::ProcessRunKnown { binary, args } => {
                     let binary = match binary.as_str() {
@@ -173,6 +245,78 @@ impl PlanExecutor {
         }
     }
 
+    fn resolve_dataset_target(
+        &self,
+        reference: &PlanValueRef,
+        values: &ValueStore,
+        session: &SessionState,
+    ) -> Result<DatasetRef, ExecutionError> {
+        match reference {
+            PlanValueRef::Step { step } => match values.get(step) {
+                Some(RuntimeValue::DatasetRef(dataset)) => Ok(dataset.clone()),
+                Some(RuntimeValue::DatasetHandle(DatasetHandle::Netcdf(handle))) => {
+                    Ok(handle.dataset.clone())
+                }
+                Some(RuntimeValue::DatasetHandle(DatasetHandle::Raster(handle))) => {
+                    Ok(handle.dataset.clone())
+                }
+                _ => Err(ExecutionError::Plan(format!(
+                    "step `{step}` did not produce a dataset target"
+                ))),
+            },
+            _ => self.resolve_dataset_ref(reference, values, session),
+        }
+    }
+
+    fn resolve_netcdf_dataset_handle(
+        &self,
+        reference: &PlanValueRef,
+        values: &ValueStore,
+    ) -> Result<NetcdfDatasetHandle, ExecutionError> {
+        match self.resolve_value(reference, values)? {
+            RuntimeValue::DatasetHandle(DatasetHandle::Netcdf(handle)) => Ok(handle.clone()),
+            _ => Err(ExecutionError::Plan(
+                "step did not produce a netcdf dataset handle".into(),
+            )),
+        }
+    }
+
+    fn resolve_array_value<'a>(
+        &self,
+        reference: &PlanValueRef,
+        values: &'a ValueStore,
+    ) -> Result<Option<&'a ArrayValue>, ExecutionError> {
+        match self.resolve_value(reference, values)? {
+            RuntimeValue::ArrayValue(array) => Ok(Some(array)),
+            _ => Ok(None),
+        }
+    }
+
+    fn resolve_required_array_value<'a>(
+        &self,
+        reference: &PlanValueRef,
+        values: &'a ValueStore,
+    ) -> Result<&'a ArrayValue, ExecutionError> {
+        self.resolve_array_value(reference, values)?
+            .ok_or_else(|| ExecutionError::Plan("step did not produce an array value".into()))
+    }
+
+    fn resolve_netcdf_variable_ref(
+        &self,
+        reference: &PlanValueRef,
+        values: &ValueStore,
+    ) -> Result<NetcdfVariableRef, ExecutionError> {
+        match self.resolve_value(reference, values)? {
+            RuntimeValue::NetcdfVariables(variables) if variables.len() == 1 => {
+                Ok(variables[0].clone())
+            }
+            RuntimeValue::VariableMetadata(described) => Ok(described.reference.clone()),
+            _ => Err(ExecutionError::Plan(
+                "step did not produce a netcdf variable reference".into(),
+            )),
+        }
+    }
+
     fn render_scalar(
         &self,
         label: &str,
@@ -184,11 +328,11 @@ impl PlanExecutor {
                 label: label.to_string(),
                 value: report.mean,
             }),
+            RuntimeValue::ScalarValue(value) => Ok(value.clone()),
             RuntimeValue::CompareReport(report) => Ok(ScalarValue {
                 label: label.to_string(),
                 value: report.difference,
             }),
-            RuntimeValue::ScalarValue(value) => Ok(value.clone()),
             _ => Err(ExecutionError::Plan(
                 "render.scalar requires a scalar-like input".into(),
             )),
@@ -198,10 +342,54 @@ impl PlanExecutor {
     fn render_table(
         &self,
         title: &str,
-        input: &PlanValueRef,
+        inputs: &[PlanValueRef],
         values: &ValueStore,
     ) -> Result<TableValue, ExecutionError> {
+        if inputs.len() > 1 {
+            let mut rows = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let value = self.resolve_value(input, values)?;
+                match value {
+                    RuntimeValue::ScalarValue(scalar) => rows.push(TableRow {
+                        label: scalar.label.clone(),
+                        value: format!("{:.6}", scalar.value),
+                    }),
+                    RuntimeValue::MeanReport(report) => rows.push(TableRow {
+                        label: report
+                            .variable
+                            .clone()
+                            .unwrap_or_else(|| "mean".to_string()),
+                        value: format!("{:.6}", report.mean),
+                    }),
+                    _ => {
+                        return Err(ExecutionError::Plan(
+                            "render.table multi-input mode requires scalar-like inputs".into(),
+                        ))
+                    }
+                }
+            }
+
+            return Ok(TableValue {
+                title: title.to_string(),
+                rows,
+            });
+        }
+
+        let input = inputs.first().ok_or_else(|| {
+            ExecutionError::Plan("render.table requires at least one input".into())
+        })?;
+
         match self.resolve_value(input, values)? {
+            RuntimeValue::NetcdfVariables(variables) => Ok(TableValue {
+                title: title.to_string(),
+                rows: variables
+                    .iter()
+                    .map(|variable| TableRow {
+                        label: variable.name.clone(),
+                        value: "netcdf variable".to_string(),
+                    })
+                    .collect(),
+            }),
             RuntimeValue::CompareReport(report) => Ok(TableValue {
                 title: title.to_string(),
                 rows: vec![
@@ -232,6 +420,13 @@ impl PlanExecutor {
                     },
                 ],
             }),
+            RuntimeValue::ScalarValue(scalar) => Ok(TableValue {
+                title: title.to_string(),
+                rows: vec![TableRow {
+                    label: scalar.label.clone(),
+                    value: format!("{:.6}", scalar.value),
+                }],
+            }),
             _ => Err(ExecutionError::Plan(
                 "render.table requires a table-like input".into(),
             )),
@@ -252,6 +447,32 @@ impl PlanExecutor {
             )),
         }
     }
+}
+
+fn arithmetic_mean(values: &[f64]) -> Result<f64, ExecutionError> {
+    if values.is_empty() {
+        return Err(ExecutionError::InvalidInput(
+            "cannot compute a mean over zero values".into(),
+        ));
+    }
+
+    Ok(values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn arithmetic_min(values: &[f64]) -> Result<f64, ExecutionError> {
+    values
+        .iter()
+        .copied()
+        .reduce(f64::min)
+        .ok_or_else(|| ExecutionError::InvalidInput("cannot compute min over zero values".into()))
+}
+
+fn arithmetic_max(values: &[f64]) -> Result<f64, ExecutionError> {
+    values
+        .iter()
+        .copied()
+        .reduce(f64::max)
+        .ok_or_else(|| ExecutionError::InvalidInput("cannot compute max over zero values".into()))
 }
 
 #[cfg(test)]
