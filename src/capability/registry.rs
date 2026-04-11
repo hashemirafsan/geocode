@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::runtime::{HostDiscovery, KnownBinary};
 
 use super::{
-    catalog::{capability_catalog, BindingFamilyKind, CapabilityStatus, CatalogCapability},
+    catalog::{BindingFamilyKind, CapabilityStatus, CatalogCapability, capability_catalog},
     types::{
         BindingKind, CapabilityBinding, CapabilityDescriptor, CapabilityId,
         PlannerCapabilityDescriptor,
@@ -113,36 +113,44 @@ fn route_available(backend: &str, discovery: &HostDiscovery) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::capability::{capability_catalog, CapabilityId, CapabilityRegistry};
+    use crate::capability::{CapabilityId, CapabilityRegistry, capability_catalog};
 
     #[test]
     fn planner_surface_contains_dataset_resolve() {
         let registry = CapabilityRegistry::discover();
-        assert!(registry
-            .planner_surface()
-            .iter()
-            .any(|capability| capability.id == CapabilityId::DatasetResolve));
+        assert!(
+            registry
+                .planner_surface()
+                .iter()
+                .any(|capability| capability.id == CapabilityId::DatasetResolve)
+        );
     }
 
     #[test]
     fn planner_surface_hides_process_fallback_capabilities() {
         let registry = CapabilityRegistry::discover();
-        assert!(!registry
-            .planner_surface()
-            .iter()
-            .any(|capability| capability.id == CapabilityId::ProcessRunKnown));
+        assert!(
+            !registry
+                .planner_surface()
+                .iter()
+                .any(|capability| capability.id == CapabilityId::ProcessRunKnown)
+        );
     }
 
     #[test]
     fn rust_catalog_contains_planned_capability_inventory() {
         let catalog = capability_catalog();
-        assert!(catalog
-            .capabilities
-            .iter()
-            .any(|capability| capability.id == "netcdf.variable.load"));
-        assert!(catalog
-            .capabilities
-            .iter()
-            .any(|capability| capability.id == "raster.band.stats"));
+        assert!(
+            catalog
+                .capabilities
+                .iter()
+                .any(|capability| capability.id == "netcdf.variable.load")
+        );
+        assert!(
+            catalog
+                .capabilities
+                .iter()
+                .any(|capability| capability.id == "raster.band.stats")
+        );
     }
 }

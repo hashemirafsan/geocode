@@ -1,6 +1,6 @@
-use ndarray::{s, Array1, ArrayD, IxDyn};
-use serde::ser::{SerializeStruct, Serializer};
+use ndarray::{Array1, ArrayD, IxDyn, s};
 use serde::Serialize;
+use serde::ser::{SerializeStruct, Serializer};
 
 use crate::engine::ExecutionError;
 

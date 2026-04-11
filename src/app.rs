@@ -3,55 +3,363 @@ use std::{
     path::PathBuf,
 };
 
+use clap::ValueEnum;
 use serde::Serialize;
 
 use crate::{
     agent,
+    auth::{
+        CodexLoginMode, CredentialRef, CredentialStore, FileCredentialStore, TokenSet,
+        codex_is_available, codex_login_status, login_openai_oauth, run_codex_login,
+    },
     capability::CapabilityRegistry,
     cli,
     engine::{DatasetKind, ExecutionError, ExecutionResult},
     executor::{PlanExecutor, RuntimeValue},
     memory::MemoryStore,
-    output::{render, OutputFormat},
+    output::{OutputFormat, render, render_for_tui},
     plan::{CapabilityInput, ExecutionPlan, PlanStep, PlanValueRef},
     policy::ExecutionPolicy,
-    provider::{supported_providers, ProviderKind, ProviderStatus, ProviderStore},
+    provider::{
+        AuthMethod, OpenAiAuthSource, ProviderConfig, ProviderKind, ProviderStatus, ProviderStore,
+        StoredProviderConfig, fetch_models, supported_providers,
+    },
     session::{CachedResultSummary, RecentTurn, SessionState, SessionStore},
     tools,
 };
 
 pub fn run(cli: cli::Cli) -> Result<(), ExecutionError> {
-    let session_store = SessionStore::new();
-    let mut session = session_store.load()?;
-    let _memory = MemoryStore::new().load()?;
-    let registry = CapabilityRegistry::discover();
-    let policy = ExecutionPolicy::from_registry(&registry);
-    let format = OutputFormat::from_json_flag(cli.json);
-
-    let (response, persist_session) = match cli.command {
-        cli::Command::Inspect(args) => handle_inspect(args.file, &registry, &policy, &mut session),
-        cli::Command::Mean(args) => {
-            handle_mean(args.file, args.var, &registry, &policy, &mut session)
+    match cli.command {
+        None => crate::tui::run(),
+        Some(cli::Command::Cli(args)) => {
+            println!("{}", execute_cli(args)?);
+            Ok(())
         }
-        cli::Command::Compare(args) => handle_compare(
-            args.file_a,
-            args.file_b,
-            args.var,
-            &registry,
-            &policy,
-            &mut session,
-        ),
-        cli::Command::Ask(args) => handle_ask(args, &registry, &policy, &mut session),
-        cli::Command::Provider(args) => handle_provider(args),
-        cli::Command::Session(args) => handle_session(args, &session_store, &mut session),
-    }?;
-
-    println!("{}", render(&response, format)?);
-    if persist_session {
-        session_store.save(&session)?;
     }
+}
+
+pub fn execute_cli(args: cli::CliArgs) -> Result<String, ExecutionError> {
+    let format = OutputFormat::from_json_flag(args.json);
+
+    match args.command {
+        cli::CliCommand::Ask(ask_args) => {
+            let response = execute_ask_command(ask_args, &mut |_| {})?;
+            render(&response, format)
+        }
+    }
+}
+
+pub fn execute_tui_input<F>(
+    input: String,
+    files: Vec<PathBuf>,
+    mut emit: F,
+) -> Result<String, ExecutionError>
+where
+    F: FnMut(AppEvent),
+{
+    let response = if input.trim_start().starts_with('/') {
+        execute_slash_command(input.trim(), &mut emit)?
+    } else {
+        execute_ask_command(
+            cli::AskArgs {
+                files,
+                query: input,
+            },
+            &mut emit,
+        )?
+    };
+
+    Ok(render_for_tui(&response))
+}
+
+pub fn fetch_provider_models(provider: ProviderKind) -> Result<Vec<String>, ExecutionError> {
+    let config = ProviderConfig::resolve(provider)?;
+
+    match fetch_models(&config) {
+        Ok(models) if !models.is_empty() => Ok(models),
+        Ok(_) => {
+            let fallback = provider.fallback_models();
+            if fallback.is_empty() {
+                Err(ExecutionError::Provider(format!(
+                    "no models were returned for {}",
+                    provider.display_name()
+                )))
+            } else {
+                Ok(fallback)
+            }
+        }
+        Err(err) => {
+            let fallback = provider.fallback_models();
+            if fallback.is_empty() {
+                Err(err)
+            } else {
+                Ok(fallback)
+            }
+        }
+    }
+}
+
+pub fn store_provider_api_key(
+    provider: ProviderKind,
+    api_key: String,
+) -> Result<(), ExecutionError> {
+    handle_provider(ProviderArgs {
+        command: ProviderCommand::SetApiKey(SetApiKeyArgs {
+            provider,
+            api_key: Some(api_key),
+            stdin: false,
+        }),
+    })?;
 
     Ok(())
+}
+
+pub fn set_provider_auth_method(
+    provider: ProviderKind,
+    auth_method: AuthMethod,
+) -> Result<(), ExecutionError> {
+    handle_provider(ProviderArgs {
+        command: ProviderCommand::SetAuthMethod(SetAuthMethodArgs {
+            provider,
+            auth_method,
+        }),
+    })?;
+
+    Ok(())
+}
+
+pub fn store_provider_oauth_token(
+    provider: ProviderKind,
+    access_token: String,
+) -> Result<(), ExecutionError> {
+    handle_provider(ProviderArgs {
+        command: ProviderCommand::SetOAuthToken(SetOAuthTokenArgs {
+            provider,
+            access_token,
+        }),
+    })?;
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn login_provider_oauth(provider: ProviderKind) -> Result<String, ExecutionError> {
+    if !matches!(provider, ProviderKind::OpenAi) {
+        return Err(ExecutionError::InvalidInput(
+            "interactive OAuth login is currently supported only for OpenAI".into(),
+        ));
+    }
+
+    let tokens = login_openai_oauth()?;
+    let store = ProviderStore::new();
+    let mut config = store.load(provider)?.unwrap_or_default();
+    config.auth_method = Some(AuthMethod::OAuth);
+    config.openai_auth_source = Some(OpenAiAuthSource::DirectOAuth);
+    config.api_key = None;
+    config.oauth_access_token = Some(tokens.access_token.clone());
+    config.oauth_refresh_token = tokens.refresh_token.clone();
+    config.oauth_expires_at_unix = tokens.expires_at_unix;
+    store.save(provider, &config)?;
+
+    let status = ProviderStatus::current(provider)?;
+    Ok(format!(
+        "OAuth login complete\nProvider: {}\nCredential Source: {}\nConfig Path: {}",
+        provider.display_name(),
+        status.credential_source,
+        store.path(provider).display(),
+    ))
+}
+
+pub fn codex_openai_available() -> bool {
+    codex_is_available()
+}
+
+#[allow(dead_code)]
+pub fn codex_openai_status() -> Result<String, ExecutionError> {
+    let status = codex_login_status()?;
+    Ok(status.summary)
+}
+
+pub fn login_provider_via_codex<F>(
+    provider: ProviderKind,
+    mode: CodexLoginMode,
+    mut emit: F,
+) -> Result<String, ExecutionError>
+where
+    F: FnMut(String),
+{
+    if !matches!(provider, ProviderKind::OpenAi) {
+        return Err(ExecutionError::InvalidInput(
+            "Codex-backed login is currently supported only for OpenAI".into(),
+        ));
+    }
+
+    let result = run_codex_login(mode, |line| emit(line))?;
+    let store = ProviderStore::new();
+    let mut config = store.load(provider)?.unwrap_or_default();
+    config.auth_method = Some(AuthMethod::OAuth);
+    config.openai_auth_source = Some(result.source);
+    config.api_key = None;
+    config.oauth_access_token = Some(result.tokens.access_token.clone());
+    config.oauth_refresh_token = result.tokens.refresh_token.clone();
+    config.oauth_expires_at_unix = result.tokens.expires_at_unix;
+    store.save(provider, &config)?;
+
+    let status = ProviderStatus::current(provider)?;
+    Ok(format!(
+        "Codex login complete\nProvider: {}\nAuth Source: {}\nCredential Source: {}\nConfig Path: {}",
+        provider.display_name(),
+        match result.source {
+            OpenAiAuthSource::DirectOAuth => "direct_oauth",
+            OpenAiAuthSource::CodexBrowser => "codex_browser",
+            OpenAiAuthSource::CodexHeadless => "codex_headless",
+        },
+        status.credential_source,
+        store.path(provider).display(),
+    ))
+}
+
+pub fn setup_provider(
+    provider: ProviderKind,
+    api_key: Option<String>,
+    model: String,
+) -> Result<String, ExecutionError> {
+    let resolved = ProviderConfig::resolve(provider)?;
+
+    if provider.requires_api_key() && !matches!(resolved.auth_method, AuthMethod::OAuth) {
+        if let Some(api_key) = api_key {
+            let trimmed = api_key.trim();
+            if trimmed.is_empty() {
+                return Err(ExecutionError::InvalidInput(
+                    "API key cannot be empty".into(),
+                ));
+            }
+
+            handle_provider(ProviderArgs {
+                command: ProviderCommand::SetApiKey(SetApiKeyArgs {
+                    provider,
+                    api_key: Some(trimmed.to_string()),
+                    stdin: false,
+                }),
+            })?;
+        } else if !resolved.configured {
+            return Err(ExecutionError::ProviderNotConfigured(format!(
+                "{} needs an API key before a model can be selected",
+                provider.display_name()
+            )));
+        }
+    } else if matches!(resolved.auth_method, AuthMethod::OAuth) && !resolved.configured {
+        return Err(ExecutionError::ProviderNotConfigured(format!(
+            "{} needs an OAuth token before a model can be selected",
+            provider.display_name()
+        )));
+    }
+
+    let trimmed_model = model.trim();
+    if trimmed_model.is_empty() {
+        return Err(ExecutionError::InvalidInput("model cannot be empty".into()));
+    }
+
+    handle_provider(ProviderArgs {
+        command: ProviderCommand::SetModel(SetModelArgs {
+            provider,
+            model: trimmed_model.to_string(),
+        }),
+    })?;
+    handle_provider(ProviderArgs {
+        command: ProviderCommand::Use(ProviderUseArgs { provider }),
+    })?;
+
+    let status = ProviderStatus::current(provider)?;
+    let config_path = ProviderStore::new().path(provider);
+    Ok(format!(
+        "Provider ready\nProvider: {}\nModel: {}\nDefault: true\nConfig Path: {}\nCredential Source: {}",
+        provider.display_name(),
+        status.config.model,
+        config_path.display(),
+        status.credential_source,
+    ))
+}
+
+#[derive(Debug, Clone)]
+pub enum AppEvent {
+    Message(String),
+    PlanningStarted,
+    PlanningFinished { millis: u128 },
+    ExecutionStarted { steps: usize },
+    ExecutionStepCompleted { step_id: String, capability: String },
+    ExecutionFinished { millis: u128 },
+}
+
+struct AppContext {
+    session_store: SessionStore,
+    session: SessionState,
+    registry: CapabilityRegistry,
+    policy: ExecutionPolicy,
+}
+
+#[derive(Debug)]
+enum SessionCommand {
+    Show,
+    Clear,
+}
+
+#[derive(Debug)]
+struct SessionArgs {
+    command: SessionCommand,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+enum ProviderCommand {
+    List,
+    Status(ProviderStatusArgs),
+    Use(ProviderUseArgs),
+    SetModel(SetModelArgs),
+    SetApiKey(SetApiKeyArgs),
+    SetAuthMethod(SetAuthMethodArgs),
+    SetOAuthToken(SetOAuthTokenArgs),
+}
+
+#[derive(Debug)]
+struct ProviderArgs {
+    command: ProviderCommand,
+}
+
+#[derive(Debug)]
+struct ProviderStatusArgs {
+    provider: Option<ProviderKind>,
+}
+
+#[derive(Debug)]
+struct ProviderUseArgs {
+    provider: ProviderKind,
+}
+
+#[derive(Debug)]
+struct SetModelArgs {
+    provider: ProviderKind,
+    model: String,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct SetApiKeyArgs {
+    provider: ProviderKind,
+    api_key: Option<String>,
+    stdin: bool,
+}
+
+#[derive(Debug)]
+struct SetAuthMethodArgs {
+    provider: ProviderKind,
+    auth_method: AuthMethod,
+}
+
+#[derive(Debug)]
+struct SetOAuthTokenArgs {
+    provider: ProviderKind,
+    access_token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +370,193 @@ pub struct CommandResponse {
     pub details: serde_json::Value,
 }
 
+fn load_context() -> Result<AppContext, ExecutionError> {
+    let session_store = SessionStore::new();
+    let session = session_store.load()?;
+    let _memory = MemoryStore::new().load()?;
+    let registry = CapabilityRegistry::discover();
+    let policy = ExecutionPolicy::from_registry(&registry);
+
+    Ok(AppContext {
+        session_store,
+        session,
+        registry,
+        policy,
+    })
+}
+
+fn execute_ask_command<F>(
+    args: cli::AskArgs,
+    emit: &mut F,
+) -> Result<CommandResponse, ExecutionError>
+where
+    F: FnMut(AppEvent),
+{
+    let mut context = load_context()?;
+    let (response, persist_session) = handle_ask(
+        args,
+        &context.registry,
+        &context.policy,
+        &mut context.session,
+        emit,
+    )?;
+
+    if persist_session {
+        context.session_store.save(&context.session)?;
+    }
+
+    Ok(response)
+}
+
+fn execute_slash_command<F>(input: &str, emit: &mut F) -> Result<CommandResponse, ExecutionError>
+where
+    F: FnMut(AppEvent),
+{
+    let mut context = load_context()?;
+    emit(AppEvent::Message(format!("Running {input}")));
+
+    let (response, persist_session) = match parse_slash_command(input)? {
+        SlashCommand::Provider(args) => handle_provider(args),
+        SlashCommand::Session(args) => {
+            handle_session(args, &context.session_store, &mut context.session)
+        }
+        SlashCommand::Model(ModelCommand::Show) => Ok((show_models()?, false)),
+        SlashCommand::Model(ModelCommand::Set { provider, model }) => {
+            handle_provider(ProviderArgs {
+                command: ProviderCommand::SetModel(SetModelArgs { provider, model }),
+            })
+        }
+    }?;
+
+    if persist_session {
+        context.session_store.save(&context.session)?;
+    }
+
+    Ok(response)
+}
+
+#[derive(Debug)]
+enum SlashCommand {
+    Provider(ProviderArgs),
+    Session(SessionArgs),
+    Model(ModelCommand),
+}
+
+#[derive(Debug)]
+enum ModelCommand {
+    Show,
+    Set {
+        provider: ProviderKind,
+        model: String,
+    },
+}
+
+fn parse_slash_command(input: &str) -> Result<SlashCommand, ExecutionError> {
+    let mut parts = input.trim_start_matches('/').split_whitespace();
+    let Some(command) = parts.next() else {
+        return Err(ExecutionError::InvalidInput(
+            "slash command cannot be empty".into(),
+        ));
+    };
+
+    match command {
+        "provider" => parse_provider_command(parts.collect()),
+        "session" => parse_session_command(parts.collect()),
+        "model" => parse_model_command(parts.collect()),
+        other => Err(ExecutionError::InvalidInput(format!(
+            "unknown slash command `{other}`"
+        ))),
+    }
+}
+
+fn parse_provider_command(parts: Vec<&str>) -> Result<SlashCommand, ExecutionError> {
+    match parts.as_slice() {
+        [] => Ok(SlashCommand::Provider(ProviderArgs {
+            command: ProviderCommand::List,
+        })),
+        ["status"] => Ok(SlashCommand::Provider(ProviderArgs {
+            command: ProviderCommand::Status(ProviderStatusArgs { provider: None }),
+        })),
+        ["status", provider] => Ok(SlashCommand::Provider(ProviderArgs {
+            command: ProviderCommand::Status(ProviderStatusArgs {
+                provider: Some(parse_provider_kind(provider)?),
+            }),
+        })),
+        ["use", provider] => Ok(SlashCommand::Provider(ProviderArgs {
+            command: ProviderCommand::Use(ProviderUseArgs {
+                provider: parse_provider_kind(provider)?,
+            }),
+        })),
+        _ => Err(ExecutionError::InvalidInput(
+            "provider commands: /provider, /provider status [provider], /provider use <provider>"
+                .into(),
+        )),
+    }
+}
+
+fn parse_session_command(parts: Vec<&str>) -> Result<SlashCommand, ExecutionError> {
+    match parts.as_slice() {
+        [] | ["show"] => Ok(SlashCommand::Session(SessionArgs {
+            command: SessionCommand::Show,
+        })),
+        ["clear"] => Ok(SlashCommand::Session(SessionArgs {
+            command: SessionCommand::Clear,
+        })),
+        _ => Err(ExecutionError::InvalidInput(
+            "session commands: /session, /session show, /session clear".into(),
+        )),
+    }
+}
+
+fn parse_model_command(parts: Vec<&str>) -> Result<SlashCommand, ExecutionError> {
+    match parts.as_slice() {
+        [] => Ok(SlashCommand::Model(ModelCommand::Show)),
+        ["set", provider, model @ ..] if !model.is_empty() => {
+            Ok(SlashCommand::Model(ModelCommand::Set {
+                provider: parse_provider_kind(provider)?,
+                model: model.join(" "),
+            }))
+        }
+        _ => Err(ExecutionError::InvalidInput(
+            "model commands: /model, /model set <provider> <model>".into(),
+        )),
+    }
+}
+
+fn parse_provider_kind(value: &str) -> Result<ProviderKind, ExecutionError> {
+    ProviderKind::from_str(value, true)
+        .map_err(|_| ExecutionError::InvalidInput(format!("unknown provider `{value}`")))
+}
+
+fn show_models() -> Result<CommandResponse, ExecutionError> {
+    let providers = ProviderKind::all()
+        .into_iter()
+        .map(ProviderStatus::current)
+        .collect::<Result<Vec<_>, _>>()?;
+    let summary = format!(
+        "Models\n{}",
+        providers
+            .iter()
+            .map(|status| format!(
+                "- {}: {}",
+                status.config.provider.command_name(),
+                status.config.model
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    Ok(CommandResponse {
+        command: "model_show",
+        summary,
+        dataset_kind: None,
+        details: serde_json::json!({
+            "providers": providers,
+        }),
+    })
+}
+
+#[allow(dead_code)]
 fn handle_inspect(
     file: PathBuf,
     registry: &CapabilityRegistry,
@@ -71,6 +566,7 @@ fn handle_inspect(
     Ok((execute_inspect(file, registry, policy, session)?, true))
 }
 
+#[allow(dead_code)]
 fn execute_inspect(
     file: PathBuf,
     registry: &CapabilityRegistry,
@@ -79,7 +575,7 @@ fn execute_inspect(
 ) -> Result<CommandResponse, ExecutionError> {
     persist_workspace(&file, session);
     let plan = build_inspect_plan(&file)?;
-    let outcome = execute_plan(&plan, registry, policy, session)?;
+    let outcome = execute_plan(&plan, registry, policy, session, &mut |_| {})?;
 
     match outcome.final_value() {
         Some(RuntimeValue::InspectReport(report)) => {
@@ -105,6 +601,7 @@ fn execute_inspect(
     }
 }
 
+#[allow(dead_code)]
 fn handle_mean(
     file: PathBuf,
     var: Option<String>,
@@ -115,6 +612,7 @@ fn handle_mean(
     Ok((execute_mean(file, var, registry, policy, session)?, true))
 }
 
+#[allow(dead_code)]
 fn execute_mean(
     file: PathBuf,
     var: Option<String>,
@@ -124,7 +622,7 @@ fn execute_mean(
 ) -> Result<CommandResponse, ExecutionError> {
     persist_workspace(&file, session);
     let plan = build_mean_plan(&file, var.clone())?;
-    let outcome = execute_plan(&plan, registry, policy, session)?;
+    let outcome = execute_plan(&plan, registry, policy, session, &mut |_| {})?;
 
     match outcome.final_value() {
         Some(RuntimeValue::MeanReport(report)) => {
@@ -177,6 +675,7 @@ fn execute_mean(
     }
 }
 
+#[allow(dead_code)]
 fn handle_compare(
     file_a: PathBuf,
     file_b: PathBuf,
@@ -191,6 +690,7 @@ fn handle_compare(
     ))
 }
 
+#[allow(dead_code)]
 fn execute_compare(
     file_a: PathBuf,
     file_b: PathBuf,
@@ -234,7 +734,7 @@ fn execute_compare(
             },
         ],
     };
-    let outcome = execute_plan(&plan, registry, policy, session)?;
+    let outcome = execute_plan(&plan, registry, policy, session, &mut |_| {})?;
 
     match outcome.final_value() {
         Some(RuntimeValue::CompareReport(report)) => {
@@ -269,12 +769,12 @@ fn execute_compare(
 }
 
 fn handle_session(
-    args: cli::SessionArgs,
+    args: SessionArgs,
     session_store: &SessionStore,
     session: &mut SessionState,
 ) -> Result<(CommandResponse, bool), ExecutionError> {
     match args.command {
-        cli::SessionCommand::Show => Ok((
+        SessionCommand::Show => Ok((
             CommandResponse {
                 command: "session_show",
                 summary: "Displayed current session state".to_string(),
@@ -286,7 +786,7 @@ fn handle_session(
             },
             false,
         )),
-        cli::SessionCommand::Clear => {
+        SessionCommand::Clear => {
             session_store.clear()?;
             *session = SessionState::default();
 
@@ -311,6 +811,7 @@ fn handle_ask(
     registry: &CapabilityRegistry,
     policy: &ExecutionPolicy,
     session: &mut SessionState,
+    emit: &mut impl FnMut(AppEvent),
 ) -> Result<(CommandResponse, bool), ExecutionError> {
     use std::time::Instant;
 
@@ -324,34 +825,46 @@ fn handle_ask(
         .collect();
     let request = agent::build_request(args.query.clone(), selected_files, session, registry);
 
-    eprintln!("Thinking...");
-    eprintln!("Request time: {:?}", start_time.elapsed());
+    emit(AppEvent::PlanningStarted);
+    emit(AppEvent::Message(format!(
+        "Planning request with provider {}",
+        match provider.config.provider {
+            ProviderKind::OpenAi => "openai",
+            ProviderKind::LmStudio => "lmstudio",
+            ProviderKind::ZAi => "z.ai",
+        }
+    )));
 
     let plan_start = Instant::now();
     let planner_response = agent::plan_with_provider(&request, &provider.config)?;
     let plan_duration = plan_start.elapsed();
 
-    eprintln!("LLM response received in: {:?}", plan_duration);
-    eprintln!("\n--- LLM Response ---");
-    match serde_json::to_string_pretty(&planner_response) {
-        Ok(json) => eprintln!("{}", json),
-        Err(e) => eprintln!("Error formatting response: {}", e),
-    }
-    eprintln!("--- End LLM Response ---\n");
+    emit(AppEvent::PlanningFinished {
+        millis: plan_duration.as_millis(),
+    });
+    emit(AppEvent::Message(format!(
+        "Planner intent: {}",
+        format!("{:?}", planner_response.intent).to_lowercase()
+    )));
 
     if let Some(plan) = &planner_response.plan {
-        eprintln!("Generated plan: {} steps", plan.steps.len());
+        emit(AppEvent::Message(format!(
+            "Generated plan: {} steps",
+            plan.steps.len()
+        )));
     }
 
     if !planner_response.requires_clarification {
         if let Some(plan) = planner_response.plan.as_ref() {
-            eprintln!("Executing capability plan...");
+            emit(AppEvent::ExecutionStarted {
+                steps: plan.steps.len(),
+            });
             let exec_start = Instant::now();
-            if let Some(executed) = execute_agent_plan(plan, registry, policy, session)? {
+            if let Some(executed) = execute_agent_plan(plan, registry, policy, session, emit)? {
                 let exec_duration = exec_start.elapsed();
-                let total_duration = start_time.elapsed();
-                eprintln!("Execution time: {:?}", exec_duration);
-                eprintln!("Total time: {:?}", total_duration);
+                emit(AppEvent::ExecutionFinished {
+                    millis: exec_duration.as_millis(),
+                });
                 return Ok((executed, true));
             }
         }
@@ -364,7 +877,10 @@ fn handle_ask(
     });
 
     let total_duration = start_time.elapsed();
-    eprintln!("Total time: {:?}", total_duration);
+    emit(AppEvent::Message(format!(
+        "Total time: {} ms",
+        total_duration.as_millis()
+    )));
 
     Ok((
         CommandResponse {
@@ -391,8 +907,9 @@ fn execute_agent_plan(
     registry: &CapabilityRegistry,
     policy: &ExecutionPolicy,
     session: &mut SessionState,
+    emit: &mut impl FnMut(AppEvent),
 ) -> Result<Option<CommandResponse>, ExecutionError> {
-    let outcome = execute_plan(plan, registry, policy, session)?;
+    let outcome = execute_plan(plan, registry, policy, session, emit)?;
     let trace = serde_json::to_value(&outcome.trace)
         .map_err(|err| ExecutionError::Output(err.to_string()))?;
 
@@ -467,6 +984,61 @@ fn execute_agent_plan(
                 "capability_trace": trace,
             }),
         })),
+        Some(RuntimeValue::NetcdfDimensions(dimensions)) => Ok(Some(CommandResponse {
+            command: "ask_result",
+            summary: "NetCDF dimensions".to_string(),
+            dataset_kind: Some(DatasetKind::Netcdf),
+            details: serde_json::json!({
+                "title": "NetCDF dimensions",
+                "rows": dimensions.into_iter().map(|dimension| serde_json::json!({
+                    "label": dimension.name,
+                    "value": match dimension.length {
+                        Some(length) => format!("len={length}"),
+                        None => "len=<unlimited>".to_string(),
+                    },
+                })).collect::<Vec<_>>(),
+                "capability_trace": trace,
+            }),
+        })),
+        Some(RuntimeValue::NetcdfVariables(variables)) => Ok(Some(CommandResponse {
+            command: "ask_result",
+            summary: "NetCDF variables".to_string(),
+            dataset_kind: Some(DatasetKind::Netcdf),
+            details: serde_json::json!({
+                "title": "NetCDF variables",
+                "rows": variables.into_iter().map(|variable| serde_json::json!({
+                    "label": variable.name,
+                    "value": variable.dataset.dataset.path,
+                })).collect::<Vec<_>>(),
+                "capability_trace": trace,
+            }),
+        })),
+        Some(RuntimeValue::VariableMetadata(variable)) => Ok(Some(CommandResponse {
+            command: "ask_result",
+            summary: format!("Variable {}", variable.reference.name),
+            dataset_kind: Some(DatasetKind::Netcdf),
+            details: serde_json::json!({
+                "title": format!("Variable {}", variable.reference.name),
+                "rows": [
+                    serde_json::json!({ "label": "Dimensions", "value": variable.metadata.dimensions.join(", ") }),
+                    serde_json::json!({ "label": "Type", "value": variable.metadata.dtype }),
+                    serde_json::json!({ "label": "Shape", "value": variable.metadata.shape.iter().map(|item| item.to_string()).collect::<Vec<_>>().join(" x ") }),
+                ],
+                "capability_trace": trace,
+            }),
+        })),
+        Some(RuntimeValue::TextValue(value)) => Ok(Some(CommandResponse {
+            command: "ask_result",
+            summary: value.text.clone(),
+            dataset_kind: None,
+            details: serde_json::json!({
+                "title": "Result",
+                "rows": [
+                    serde_json::json!({ "label": "Output", "value": value.text }),
+                ],
+                "capability_trace": trace,
+            }),
+        })),
         _ => Ok(None),
     }
 }
@@ -476,10 +1048,21 @@ fn execute_plan(
     registry: &CapabilityRegistry,
     policy: &ExecutionPolicy,
     session: &mut SessionState,
+    emit: &mut impl FnMut(AppEvent),
 ) -> Result<crate::executor::ExecutionOutcome, ExecutionError> {
-    PlanExecutor::new(registry.clone(), policy.clone()).execute(plan, session)
+    PlanExecutor::new(registry.clone(), policy.clone()).execute_with_progress(
+        plan,
+        session,
+        |step_id, capability| {
+            emit(AppEvent::ExecutionStepCompleted {
+                step_id: step_id.to_string(),
+                capability: capability.to_string(),
+            });
+        },
+    )
 }
 
+#[allow(dead_code)]
 fn build_inspect_plan(file: &PathBuf) -> Result<ExecutionPlan, ExecutionError> {
     let kind = tools::detect_dataset_kind(file)?;
     let mut steps = vec![PlanStep {
@@ -536,6 +1119,7 @@ fn build_inspect_plan(file: &PathBuf) -> Result<ExecutionPlan, ExecutionError> {
     })
 }
 
+#[allow(dead_code)]
 fn build_mean_plan(file: &PathBuf, var: Option<String>) -> Result<ExecutionPlan, ExecutionError> {
     let kind = tools::detect_dataset_kind(file)?;
     if matches!(kind, DatasetKind::Netcdf) {
@@ -609,6 +1193,7 @@ fn build_mean_plan(file: &PathBuf, var: Option<String>) -> Result<ExecutionPlan,
     }
 }
 
+#[allow(dead_code)]
 fn record_turn(session: &mut SessionState, outcome: &str, goal: &str, kind: DatasetKind) {
     session.current_goal = Some(goal.to_string());
     session.recent_turns.push(RecentTurn {
@@ -621,6 +1206,7 @@ fn record_turn(session: &mut SessionState, outcome: &str, goal: &str, kind: Data
     });
 }
 
+#[allow(dead_code)]
 fn persist_workspace(file: &PathBuf, session: &mut SessionState) {
     if let Some(parent) = file.parent() {
         session.workspace_path = Some(parent.to_path_buf());
@@ -634,9 +1220,9 @@ fn with_trace(mut details: serde_json::Value, trace: serde_json::Value) -> serde
     details
 }
 
-fn handle_provider(args: cli::ProviderArgs) -> Result<(CommandResponse, bool), ExecutionError> {
+fn handle_provider(args: ProviderArgs) -> Result<(CommandResponse, bool), ExecutionError> {
     match args.command {
-        cli::ProviderCommand::List => {
+        ProviderCommand::List => {
             let providers = supported_providers()?;
             Ok((
                 CommandResponse {
@@ -648,7 +1234,7 @@ fn handle_provider(args: cli::ProviderArgs) -> Result<(CommandResponse, bool), E
                 false,
             ))
         }
-        cli::ProviderCommand::Status(args) => {
+        ProviderCommand::Status(args) => {
             let status = ProviderStatus::current(args.provider.unwrap_or(ProviderKind::OpenAi))?;
             Ok((
                 CommandResponse {
@@ -661,7 +1247,7 @@ fn handle_provider(args: cli::ProviderArgs) -> Result<(CommandResponse, bool), E
                 false,
             ))
         }
-        cli::ProviderCommand::Use(args) => {
+        ProviderCommand::Use(args) => {
             let store = ProviderStore::new();
             store.save_default_provider(args.provider)?;
             let status = ProviderStatus::current(args.provider)?;
@@ -679,7 +1265,7 @@ fn handle_provider(args: cli::ProviderArgs) -> Result<(CommandResponse, bool), E
                 false,
             ))
         }
-        cli::ProviderCommand::SetModel(args) => {
+        ProviderCommand::SetModel(args) => {
             let store = ProviderStore::new();
             let mut config = store.load(args.provider)?.unwrap_or_default();
             config.model = Some(args.model.clone());
@@ -701,7 +1287,42 @@ fn handle_provider(args: cli::ProviderArgs) -> Result<(CommandResponse, bool), E
                 false,
             ))
         }
-        cli::ProviderCommand::SetApiKey(args) => {
+        ProviderCommand::SetAuthMethod(args) => {
+            let store = ProviderStore::new();
+            let mut config = store.load(args.provider)?.unwrap_or_default();
+            config.auth_method = Some(args.auth_method);
+
+            if matches!(args.auth_method, AuthMethod::ApiKey) {
+                config.openai_auth_source = None;
+                config.oauth_access_token = None;
+                config.oauth_refresh_token = None;
+                config.oauth_expires_at_unix = None;
+            }
+
+            if matches!(args.auth_method, AuthMethod::OAuth) {
+                config.api_key = None;
+                config.openai_auth_source = Some(OpenAiAuthSource::DirectOAuth);
+            }
+
+            store.save(args.provider, &config)?;
+            let status = ProviderStatus::current(args.provider)?;
+
+            Ok((
+                CommandResponse {
+                    command: "provider_set_auth_method",
+                    summary: format!("Stored auth method for {:?}", args.provider),
+                    dataset_kind: None,
+                    details: serde_json::json!({
+                        "provider_name": args.provider,
+                        "auth_method": args.auth_method,
+                        "path": store.path(args.provider),
+                        "provider": status,
+                    }),
+                },
+                false,
+            ))
+        }
+        ProviderCommand::SetApiKey(args) => {
             if matches!(args.provider, ProviderKind::LmStudio) {
                 return Err(ExecutionError::InvalidInput(
                     "LM Studio does not require an API key; configure LMSTUDIO_BASE_URL or use the default local endpoint instead.".into(),
@@ -726,7 +1347,18 @@ fn handle_provider(args: cli::ProviderArgs) -> Result<(CommandResponse, bool), E
 
             let store = ProviderStore::new();
             let mut config = store.load(args.provider)?.unwrap_or_default();
+            config.auth_method = Some(AuthMethod::ApiKey);
+            config.openai_auth_source = None;
+            FileCredentialStore::new().save_api_key(
+                &CredentialRef {
+                    provider: args.provider,
+                },
+                api_key.trim(),
+            )?;
             config.api_key = Some(api_key.trim().to_string());
+            config.oauth_access_token = None;
+            config.oauth_refresh_token = None;
+            config.oauth_expires_at_unix = None;
             store.save(args.provider, &config)?;
             let status = ProviderStatus::current(args.provider)?;
 
@@ -734,6 +1366,52 @@ fn handle_provider(args: cli::ProviderArgs) -> Result<(CommandResponse, bool), E
                 CommandResponse {
                     command: "provider_set_api_key",
                     summary: format!("Stored API key for {:?}", args.provider),
+                    dataset_kind: None,
+                    details: serde_json::json!({
+                        "provider_name": args.provider,
+                        "path": store.path(args.provider),
+                        "provider": status,
+                    }),
+                },
+                false,
+            ))
+        }
+        ProviderCommand::SetOAuthToken(args) => {
+            if !matches!(args.provider, ProviderKind::OpenAi) {
+                return Err(ExecutionError::InvalidInput(
+                    "OAuth token setup is currently supported only for OpenAI.".into(),
+                ));
+            }
+
+            if args.access_token.trim().is_empty() {
+                return Err(ExecutionError::InvalidInput(
+                    "OAuth access token cannot be empty".into(),
+                ));
+            }
+
+            let store = ProviderStore::new();
+            let mut config: StoredProviderConfig = store.load(args.provider)?.unwrap_or_default();
+            config.auth_method = Some(AuthMethod::OAuth);
+            config.openai_auth_source = Some(OpenAiAuthSource::DirectOAuth);
+            config.api_key = None;
+            FileCredentialStore::new().save_tokens(
+                &CredentialRef {
+                    provider: args.provider,
+                },
+                &TokenSet {
+                    access_token: args.access_token.trim().to_string(),
+                    refresh_token: None,
+                    expires_at_unix: None,
+                },
+            )?;
+            config.oauth_access_token = Some(args.access_token.trim().to_string());
+            store.save(args.provider, &config)?;
+            let status = ProviderStatus::current(args.provider)?;
+
+            Ok((
+                CommandResponse {
+                    command: "provider_set_oauth_token",
+                    summary: format!("Stored OAuth token for {:?}", args.provider),
                     dataset_kind: None,
                     details: serde_json::json!({
                         "provider_name": args.provider,
@@ -769,13 +1447,18 @@ fn select_ask_provider() -> Result<ProviderStatus, ExecutionError> {
         return Ok(openai);
     }
 
+    let zai = ProviderStatus::current(ProviderKind::ZAi)?;
+    if zai.config.configured {
+        return Ok(zai);
+    }
+
     let lmstudio = ProviderStatus::current(ProviderKind::LmStudio)?;
     if lmstudio.config.configured {
         return Ok(lmstudio);
     }
 
     Err(ExecutionError::ProviderNotConfigured(
-        "No planner provider is configured. Set OPENAI_API_KEY or run a local LM Studio server at LMSTUDIO_BASE_URL (default: http://127.0.0.1:1234/v1).".into(),
+        "No planner provider is configured. Configure OpenAI, Z.Ai, or run a local LM Studio server in the provider setup flow.".into(),
     ))
 }
 
@@ -827,7 +1510,13 @@ mod tests {
             ],
         };
 
-        let result = execute_agent_plan(&plan, &registry, &policy, &mut SessionState::default());
+        let result = execute_agent_plan(
+            &plan,
+            &registry,
+            &policy,
+            &mut SessionState::default(),
+            &mut |_| {},
+        );
         assert!(result.is_err() || result.expect("result option").is_some());
     }
 }

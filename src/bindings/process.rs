@@ -33,7 +33,7 @@ mod tests {
     use std::{path::Path, process::Command};
 
     use tempfile::TempDir;
-    use tiff::encoder::{colortype::Gray8, TiffEncoder};
+    use tiff::encoder::{TiffEncoder, colortype::Gray8};
 
     use super::run_gdalinfo_json;
 

@@ -282,8 +282,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        build_request, normalize_planner_response, AgentIntent, PlannerRequest, PlannerResponse,
-        PlannerSessionContext,
+        AgentIntent, PlannerRequest, PlannerResponse, PlannerSessionContext, build_request,
+        normalize_planner_response,
     };
     use crate::{
         capability::{CapabilityId, CapabilityRegistry},

@@ -5,9 +5,9 @@ use serde::Serialize;
 use crate::{
     array,
     bindings::{
+        ArrayValue, DatasetHandle, NetcdfDatasetHandle, NetcdfVariableRef, RasterDatasetHandle,
         describe_netcdf_variable, list_netcdf_dimensions, list_netcdf_variables,
-        open_netcdf_dataset, read_netcdf_variable, ArrayValue, DatasetHandle, NetcdfDatasetHandle,
-        NetcdfVariableRef, RasterDatasetHandle,
+        open_netcdf_dataset, read_netcdf_variable,
     },
     capability::CapabilityRegistry,
     engine::{DatasetKind, DatasetRef, ExecutionError, TraceEvent},
@@ -54,11 +54,24 @@ impl PlanExecutor {
         }
     }
 
+    #[allow(dead_code)]
     pub fn execute(
         &self,
         plan: &ExecutionPlan,
         session: &mut SessionState,
     ) -> Result<ExecutionOutcome, ExecutionError> {
+        self.execute_with_progress(plan, session, |_, _| {})
+    }
+
+    pub fn execute_with_progress<F>(
+        &self,
+        plan: &ExecutionPlan,
+        session: &mut SessionState,
+        mut on_step_completed: F,
+    ) -> Result<ExecutionOutcome, ExecutionError>
+    where
+        F: FnMut(&str, &str),
+    {
         self.policy.validate_plan(plan, &self.registry, session)?;
 
         let mut values = ValueStore::default();
@@ -188,7 +201,7 @@ impl PlanExecutor {
                         other => {
                             return Err(ExecutionError::Capability(format!(
                                 "unsupported known binary `{other}`"
-                            )))
+                            )));
                         }
                     };
                     let owned_args = args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -202,6 +215,7 @@ impl PlanExecutor {
                 stage: "execute".to_string(),
                 detail: format!("executed {} as {}", step.id, step.capability.as_str()),
             });
+            on_step_completed(&step.id, step.capability.as_str());
             values.insert(step.id.clone(), value);
         }
 
@@ -386,7 +400,7 @@ impl PlanExecutor {
                         return Err(ExecutionError::Plan(
                             "render.table multi-input mode requires scalar-like or array inputs"
                                 .into(),
-                        ))
+                        ));
                     }
                 }
             }

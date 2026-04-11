@@ -33,7 +33,7 @@ impl PromptBuilder {
             ProviderKind::LmStudio => {
                 "/no_think You are a strict JSON planner for a geospatial CLI. Return JSON only with no markdown. Keep the response minimal and do not include reasoning.".to_string()
             }
-            ProviderKind::OpenAi => {
+            ProviderKind::OpenAi | ProviderKind::ZAi => {
                 "You are a strict JSON planner for a geospatial CLI. Return JSON only with no markdown.".to_string()
             }
         }
@@ -266,13 +266,17 @@ mod tests {
         assert!(prompts.user_prompt.contains(r#"Schema: {"input": "$s1"}"#));
         assert!(prompts.user_prompt.contains("Note: Test note"));
         assert!(prompts.user_prompt.contains("Plan Construction:"));
-        assert!(prompts
-            .user_prompt
-            .contains("Use the Schema examples for correct input structure"));
+        assert!(
+            prompts
+                .user_prompt
+                .contains("Use the Schema examples for correct input structure")
+        );
         assert!(prompts.user_prompt.contains("Response Validation:"));
         assert!(prompts.user_prompt.contains("Request JSON:"));
-        assert!(prompts
-            .user_prompt
-            .contains("what is the mean temperature?"));
+        assert!(
+            prompts
+                .user_prompt
+                .contains("what is the mean temperature?")
+        );
     }
 }

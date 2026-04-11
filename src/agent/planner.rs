@@ -5,13 +5,13 @@ use crate::{
     agent::{
         prompt_builder::PromptBuilder,
         schema::{
-            deserialize_string_or_vec, normalize_planner_response, preflight_scope_check,
-            AgentIntent, PlannerRequest, PlannerResponse,
+            AgentIntent, PlannerRequest, PlannerResponse, deserialize_string_or_vec,
+            normalize_planner_response, preflight_scope_check,
         },
     },
     engine::ExecutionError,
-    provider::planner_client,
     provider::ProviderConfig,
+    provider::planner_client,
 };
 
 pub fn plan_with_provider(
@@ -25,7 +25,7 @@ pub fn plan_with_provider(
     let prompt_builder = PromptBuilder::new(provider.provider);
     let prompts = prompt_builder.build(request);
 
-    let content = planner_client(provider.provider).plan_json(
+    let content = planner_client(provider).plan_json(
         provider,
         &prompts.system_prompt,
         &prompts.user_prompt,

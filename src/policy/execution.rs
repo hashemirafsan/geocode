@@ -59,7 +59,7 @@ impl ExecutionPolicy {
                         other => {
                             return Err(ExecutionError::Policy(format!(
                                 "binary `{other}` is not allowed by policy"
-                            )))
+                            )));
                         }
                     };
 
@@ -114,8 +114,10 @@ mod tests {
             }],
         };
 
-        assert!(policy
-            .validate_plan(&plan, &registry, &SessionState::default())
-            .is_err());
+        assert!(
+            policy
+                .validate_plan(&plan, &registry, &SessionState::default())
+                .is_err()
+        );
     }
 }

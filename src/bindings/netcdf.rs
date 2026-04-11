@@ -174,7 +174,7 @@ pub fn read_netcdf_variable_values(
         other => {
             return Err(ExecutionError::InvalidInput(format!(
                 "unsupported netcdf variable type for mean: {other:?}"
-            )))
+            )));
         }
     };
 

@@ -8,11 +8,7 @@ pub enum OutputFormat {
 
 impl OutputFormat {
     pub fn from_json_flag(json: bool) -> Self {
-        if json {
-            Self::Json
-        } else {
-            Self::Text
-        }
+        if json { Self::Json } else { Self::Text }
     }
 }
 
@@ -21,6 +17,13 @@ pub fn render(response: &CommandResponse, format: OutputFormat) -> Result<String
         OutputFormat::Text => Ok(render_text(response)),
         OutputFormat::Json => serde_json::to_string_pretty(response)
             .map_err(|err| ExecutionError::Output(err.to_string())),
+    }
+}
+
+pub fn render_for_tui(response: &CommandResponse) -> String {
+    match response.command {
+        "ask" => render_ask_tui(response),
+        _ => render_text(response),
     }
 }
 
@@ -181,6 +184,14 @@ fn render_ask(response: &CommandResponse) -> String {
     lines.join("\n")
 }
 
+fn render_ask_tui(response: &CommandResponse) -> String {
+    if let Some(question) = response.details["plan"]["clarification_question"].as_str() {
+        return question.to_string();
+    }
+
+    response.summary.clone()
+}
+
 fn render_provider_status(response: &CommandResponse) -> String {
     let provider = display_provider_name(
         response.details["config"]["provider"]
@@ -217,8 +228,9 @@ fn render_provider_status(response: &CommandResponse) -> String {
 
 fn display_provider_name(name: &str) -> &str {
     match name {
-        "open_ai" => "openai",
-        "lm_studio" => "lmstudio",
+        "open_ai" => "OpenAI",
+        "lm_studio" => "LMStudio",
+        "z_ai" => "Z.Ai",
         other => other,
     }
 }
@@ -265,7 +277,7 @@ fn render_compare(response: &CommandResponse) -> String {
             append_capability_trace(
                 response,
                 format!(
-                "File A: {file_a}\nFile B: {file_b}\nType: netcdf\nVariable: {variable}\nMean A: {mean_a:.6}\nMean B: {mean_b:.6}\nDifference (B - A): {difference:.6}"
+                    "File A: {file_a}\nFile B: {file_b}\nType: netcdf\nVariable: {variable}\nMean A: {mean_a:.6}\nMean B: {mean_b:.6}\nDifference (B - A): {difference:.6}"
                 ),
             )
         }

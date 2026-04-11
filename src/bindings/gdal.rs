@@ -3,7 +3,7 @@ use std::path::Path;
 use gdal::Dataset;
 
 use crate::{
-    bindings::{run_gdalinfo_json, GeotiffBandMetadata, GeotiffMetadata},
+    bindings::{GeotiffBandMetadata, GeotiffMetadata, run_gdalinfo_json},
     engine::ExecutionError,
 };
 
@@ -61,7 +61,7 @@ mod tests {
     use std::{path::Path, process::Command};
 
     use tempfile::TempDir;
-    use tiff::encoder::{colortype::Gray8, TiffEncoder};
+    use tiff::encoder::{TiffEncoder, colortype::Gray8};
 
     use super::{read_geotiff_mean, read_geotiff_metadata};
 
