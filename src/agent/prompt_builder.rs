@@ -266,17 +266,13 @@ mod tests {
         assert!(prompts.user_prompt.contains(r#"Schema: {"input": "$s1"}"#));
         assert!(prompts.user_prompt.contains("Note: Test note"));
         assert!(prompts.user_prompt.contains("Plan Construction:"));
-        assert!(
-            prompts
-                .user_prompt
-                .contains("Use the Schema examples for correct input structure")
-        );
+        assert!(prompts
+            .user_prompt
+            .contains("Use the Schema examples for correct input structure"));
         assert!(prompts.user_prompt.contains("Response Validation:"));
         assert!(prompts.user_prompt.contains("Request JSON:"));
-        assert!(
-            prompts
-                .user_prompt
-                .contains("what is the mean temperature?")
-        );
+        assert!(prompts
+            .user_prompt
+            .contains("what is the mean temperature?"));
     }
 }

@@ -11,21 +11,21 @@ use crossterm::{
         MouseEvent, MouseEventKind,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    Terminal,
 };
 
 use crate::{
     app::{self, AppEvent},
     engine::ExecutionError,
-    provider::{AuthMethod, ProviderConfig, ProviderKind},
+    provider::{AuthMethod, ProviderConfig, ProviderKind, ProviderStatus},
 };
 
 pub fn run() -> Result<(), ExecutionError> {
@@ -89,10 +89,34 @@ struct FileEntry {
     depth: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnState {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnResponseKind {
+    Assistant,
+    Error,
+    Note,
+}
+
 #[derive(Debug)]
-struct ChatEntry {
-    role: &'static str,
+struct TurnResponse {
+    kind: TurnResponseKind,
     content: String,
+}
+
+#[derive(Debug)]
+struct TurnEntry {
+    label: &'static str,
+    prompt: String,
+    attachments: Vec<PathBuf>,
+    events: Vec<String>,
+    response: Option<TurnResponse>,
+    state: TurnState,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -154,8 +178,8 @@ struct TuiApp {
     file_index: usize,
     input: String,
     attachments: Vec<PathBuf>,
-    chat: Vec<ChatEntry>,
-    activity: Vec<String>,
+    turns: Vec<TurnEntry>,
+    active_turn: Option<usize>,
     status: String,
     suggestions: Vec<PathBuf>,
     suggestion_index: usize,
@@ -171,8 +195,8 @@ struct TuiApp {
     codex_available: bool,
 }
 
-const MAX_CHAT_ENTRIES: usize = 200;
-const MAX_ACTIVITY_ENTRIES: usize = 200;
+const MAX_TURN_ENTRIES: usize = 200;
+const MAX_TURN_EVENTS: usize = 64;
 
 impl TuiApp {
     fn new() -> Result<Self, ExecutionError> {
@@ -185,8 +209,8 @@ impl TuiApp {
             file_index: 0,
             input: String::new(),
             attachments: Vec::new(),
-            chat: Vec::new(),
-            activity: vec!["Ready".to_string()],
+            turns: Vec::new(),
+            active_turn: None,
             status: "Idle".to_string(),
             suggestions: Vec::new(),
             suggestion_index: 0,
@@ -207,25 +231,33 @@ impl TuiApp {
         self.frame_tick = self.frame_tick.wrapping_add(1);
         let outer = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(28), Constraint::Percentage(72)])
+            .constraints([Constraint::Percentage(76), Constraint::Percentage(24)])
             .split(frame.area());
-        let right = Layout::default()
+        let main = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(4),
-                Constraint::Length(6),
                 Constraint::Min(10),
-                Constraint::Length(7),
+                Constraint::Length(6),
+            ])
+            .split(outer[0]);
+        let rail = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(8),
+                Constraint::Length(8),
+                Constraint::Min(10),
             ])
             .split(outer[1]);
 
-        self.render_sidebar(frame, outer[0]);
-        self.render_header(frame, right[0]);
-        self.render_status(frame, right[1]);
-        self.results_area = right[2];
-        self.render_chat(frame, right[2]);
-        self.composer_area = right[3];
-        self.render_input(frame, right[3]);
+        self.render_header(frame, main[0]);
+        self.results_area = main[1];
+        self.render_chat(frame, main[1]);
+        self.composer_area = main[2];
+        self.render_input(frame, main[2]);
+        self.render_context_panel(frame, rail[0]);
+        self.render_session_panel(frame, rail[1]);
+        self.render_sidebar(frame, rail[2]);
 
         if self.modal.is_some() {
             self.render_modal(frame);
@@ -233,6 +265,8 @@ impl TuiApp {
     }
 
     fn render_header(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let spinner = spinner_frame(self.frame_tick, self.busy);
+        let status_style = status_style(&self.status, self.busy);
         let text = Text::from(vec![
             Line::from(vec![
                 Span::styled(
@@ -243,26 +277,101 @@ impl TuiApp {
                 ),
                 Span::raw("  "),
                 Span::styled("AI geospatial workspace", Style::default().fg(Color::Gray)),
+                Span::raw("  "),
+                Span::styled(spinner, status_style),
+                Span::raw("  "),
+                Span::styled(&self.status, status_style),
             ]),
             Line::from(vec![
                 Span::styled(
-                    "System ",
+                    "Flow ",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(
-                    "Use @ for files from the current directory and / to open provider, session, and model actions.",
+                    "Conversation on the left, mixed context rail on the right. Use @ for files and / for commands.",
                 ),
             ]),
         ]);
 
         let paragraph = Paragraph::new(text).block(
             Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
+                .borders(Borders::BOTTOM)
                 .style(Style::default().fg(Color::White).bg(Color::Black)),
         );
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_context_panel(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let selected_file = self
+            .files
+            .get(self.file_index)
+            .map(|entry| entry.relative_path.display().to_string())
+            .unwrap_or_else(|| "<none>".to_string());
+        let latest_activity = self.latest_activity();
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(self.status.as_str(), Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("Latest: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(latest_activity, Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![
+                Span::styled("Attachments: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    self.attachments.len().to_string(),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Selected: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(selected_file, Style::default().fg(Color::Gray)),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .block(panel_block("Context", false))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_session_panel(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let (provider_name, model_name) = current_provider_summary();
+        let focus = if self.sidebar_selected {
+            "Files"
+        } else if self.modal.is_some() {
+            "Modal"
+        } else {
+            "Prompt"
+        };
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Workspace: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    self.cwd.display().to_string(),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Provider: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(provider_name, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("Model: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(model_name, Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![
+                Span::styled("Focus: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(focus, Style::default().fg(Color::White)),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .block(panel_block("Session", false))
+            .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
     }
 
@@ -281,19 +390,15 @@ impl TuiApp {
             .collect::<Vec<_>>();
 
         let mut state = ListState::default().with_selected(Some(self.file_index));
-        let title = format!("Workspace [{}]", self.cwd.display());
+        let title = format!("Files [{}]", self.files.len());
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(if self.sidebar_selected {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    }),
-            )
+            .block(panel_block(&title, self.sidebar_selected).title_bottom(
+                if self.sidebar_selected {
+                    "Enter attaches file"
+                } else {
+                    "Tab focuses files"
+                },
+            ))
             .highlight_style(
                 Style::default()
                     .bg(Color::Rgb(28, 34, 48))
@@ -304,61 +409,11 @@ impl TuiApp {
         frame.render_stateful_widget(list, area, &mut state);
     }
 
-    fn render_status(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let spinner = spinner_frame(self.frame_tick, self.busy);
-        let status_style = if self.busy {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if self.status == "Failed" {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        };
-
-        let mut lines = vec![Line::from(vec![
-            Span::styled(spinner, status_style),
-            Span::raw("  "),
-            Span::styled(&self.status, status_style),
-        ])];
-
-        for item in self
-            .activity
-            .iter()
-            .rev()
-            .take(3)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-        {
-            lines.push(Line::from(vec![
-                Span::styled("• ", Style::default().fg(Color::DarkGray)),
-                Span::styled(item, Style::default().fg(Color::Gray)),
-            ]));
-        }
-
-        let paragraph = Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .title("Live Activity")
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        );
-        frame.render_widget(paragraph, area);
-    }
-
     fn render_chat(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let lines = self.results_lines();
+        let title = format!("Conversation [{}]", self.turns.len());
         let paragraph = Paragraph::new(Text::from(lines))
-            .block(
-                Block::default()
-                    .title("Results")
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            )
+            .block(panel_block(&title, false).title_bottom("PgUp/PgDn or mouse wheel scrolls"))
             .wrap(Wrap { trim: false });
         let viewport_width = area.width.saturating_sub(2);
         let viewport_height = area.height.saturating_sub(2) as usize;
@@ -369,61 +424,64 @@ impl TuiApp {
     }
 
     fn render_input(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let attachments = if self.attachments.is_empty() {
-            "Attachments: <none>".to_string()
-        } else {
-            format!(
-                "Attachments: {}",
-                self.attachments
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
         let busy = if self.busy { " [busy]" } else { "" };
+        let prompt_title = format!("Prompt{busy}");
+        let attachment_summary = summarize_paths(&self.attachments, None);
+        let suggestion_summary = summarize_paths(&self.suggestions, Some(self.suggestion_index));
+        let focus_label = if self.sidebar_selected {
+            "files"
+        } else {
+            "prompt"
+        };
         let hint = if self.sidebar_selected {
-            "Sidebar focus: Enter attaches selected file, Tab returns to composer, Ctrl+C exits"
+            "Tab prompt  Enter attach  Ctrl+C quit"
         } else {
-            "Composer focus: Enter submits, PgUp/PgDn scroll results, @ opens file suggestions, / opens commands, Tab moves to sidebar"
+            "Enter send  @ files  / commands  Tab files"
         };
-        let suggestions = if self.suggestions.is_empty() {
-            "Suggestions: <none>".to_string()
-        } else {
-            format!(
-                "Suggestions: {}",
-                self.suggestions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, path)| {
-                        if index == self.suggestion_index {
-                            format!(">{}", path.display())
-                        } else {
-                            path.display().to_string()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            )
-        };
-        let paragraph = Paragraph::new(format!(
-            "{attachments}\n{suggestions}\n> {}\n{hint}",
-            self.input
-        ))
-        .block(
-            Block::default()
-                .title(format!("Composer{busy}"))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(if self.sidebar_selected {
-                    Style::default().fg(Color::DarkGray)
-                } else if self.busy {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    Style::default().fg(Color::Green)
-                }),
-        )
-        .wrap(Wrap { trim: false });
+        let text = Text::from(vec![
+            Line::from(vec![
+                Span::styled("focus ", Style::default().fg(Color::DarkGray)),
+                Span::styled(focus_label, Style::default().fg(Color::White)),
+                Span::raw("  "),
+                Span::styled("attached ", Style::default().fg(Color::DarkGray)),
+                Span::styled(attachment_summary, Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "> ",
+                    Style::default().fg(if self.sidebar_selected {
+                        Color::DarkGray
+                    } else if self.busy {
+                        Color::Cyan
+                    } else {
+                        Color::Green
+                    }),
+                ),
+                Span::styled(
+                    if self.input.is_empty() {
+                        "Ask GeoCode about your workspace".to_string()
+                    } else {
+                        self.input.clone()
+                    },
+                    if self.input.is_empty() {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("matches ", Style::default().fg(Color::DarkGray)),
+                Span::styled(suggestion_summary, Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![Span::styled(
+                hint,
+                Style::default().fg(Color::DarkGray),
+            )]),
+        ]);
+        let paragraph = Paragraph::new(text)
+            .block(panel_block(&prompt_title, !self.sidebar_selected).title_bottom("Prompt"))
+            .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
     }
 
@@ -886,10 +944,6 @@ impl TuiApp {
                     KeyCode::Enter => {
                         if input.trim().is_empty() && !has_saved_key {
                             self.status = "API key required".to_string();
-                            self.push_activity(format!(
-                                "{} needs an API key",
-                                provider.display_name()
-                            ));
                         } else {
                             let next_key = if input.trim().is_empty() {
                                 None
@@ -957,7 +1011,6 @@ impl TuiApp {
         if self.attachments.iter().all(|existing| existing != &path) {
             self.attachments.push(path.clone());
         }
-        self.push_activity(format!("Attached {}", path.display()));
         self.status = format!("Attached {}", path.display());
     }
 
@@ -996,23 +1049,10 @@ impl TuiApp {
 
         let input = std::mem::take(&mut self.input);
         let attachments = self.attachments.clone();
-        let prompt = if attachments.is_empty() {
-            input.clone()
-        } else {
-            format!(
-                "{}\nFiles: {}",
-                input,
-                attachments
-                    .iter()
-                    .map(|path| format!("@{}", path.display()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
         self.suggestions.clear();
         self.suggestion_index = 0;
         self.attachments.clear();
-        self.start_worker("user", prompt, input, attachments)
+        self.start_worker(input.clone(), input, attachments)
     }
 
     fn process_worker_messages(&mut self) {
@@ -1036,13 +1076,9 @@ impl TuiApp {
             match message {
                 WorkerMessage::Event(event) => self.handle_app_event(event),
                 WorkerMessage::Completed(text) => {
-                    self.push_chat(ChatEntry {
-                        role: "assistant",
-                        content: text,
-                    });
+                    self.finish_active_turn(text, TurnResponseKind::Assistant);
                     self.scroll_results_to_bottom();
                     self.status = "Completed".to_string();
-                    self.push_activity("Result ready".to_string());
                     self.busy = false;
                 }
                 WorkerMessage::AuthProgress(line) => {
@@ -1073,17 +1109,12 @@ impl TuiApp {
                         selected,
                     });
                     self.status = format!("{} models loaded", provider.display_name());
-                    self.push_activity(self.status.clone());
                     self.busy = false;
                 }
                 WorkerMessage::Failed(error) => {
                     self.modal = None;
-                    self.push_chat(ChatEntry {
-                        role: "error",
-                        content: error.clone(),
-                    });
+                    self.finish_active_turn(error.clone(), TurnResponseKind::Error);
                     self.scroll_results_to_bottom();
-                    self.push_activity(format!("Error: {error}"));
                     self.status = "Failed".to_string();
                     self.busy = false;
                 }
@@ -1099,30 +1130,30 @@ impl TuiApp {
         match event {
             AppEvent::Message(message) => {
                 self.status = message.clone();
-                self.push_activity(message);
+                self.append_active_turn_event(message);
             }
             AppEvent::PlanningStarted => {
                 self.status = "Planning".to_string();
-                self.push_activity("Planning started".to_string());
+                self.append_active_turn_event("Planning started");
             }
             AppEvent::PlanningFinished { millis } => {
                 self.status = format!("Planning finished in {millis} ms");
-                self.push_activity(self.status.clone());
+                self.append_active_turn_event(self.status.clone());
             }
             AppEvent::ExecutionStarted { steps } => {
                 self.status = format!("Executing {steps} steps");
-                self.push_activity(self.status.clone());
+                self.append_active_turn_event(self.status.clone());
             }
             AppEvent::ExecutionStepCompleted {
                 step_id,
                 capability,
             } => {
                 self.status = format!("Completed {step_id} ({capability})");
-                self.push_activity(self.status.clone());
+                self.append_active_turn_event(self.status.clone());
             }
             AppEvent::ExecutionFinished { millis } => {
                 self.status = format!("Execution finished in {millis} ms");
-                self.push_activity(self.status.clone());
+                self.append_active_turn_event(self.status.clone());
             }
         }
     }
@@ -1130,8 +1161,8 @@ impl TuiApp {
     fn results_lines(&self) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
-        for entry in &self.chat {
-            lines.extend(render_chat_entry(entry));
+        for turn in &self.turns {
+            lines.extend(render_turn_entry(turn));
             lines.push(Line::from(String::new()));
         }
 
@@ -1150,24 +1181,13 @@ impl TuiApp {
     fn approximate_results_height(&self, width: u16) -> usize {
         let width = width.max(1) as usize;
 
-        if self.chat.is_empty() {
+        if self.turns.is_empty() {
             return 1;
         }
 
-        self.chat
+        self.turns
             .iter()
-            .map(|entry| {
-                let body_height = entry
-                    .content
-                    .lines()
-                    .map(|line| {
-                        let line_width = line.chars().count().max(1);
-                        line_width.div_ceil(width)
-                    })
-                    .sum::<usize>();
-
-                1 + body_height + 1
-            })
+            .map(|turn| approximate_turn_height(turn, width))
             .sum()
     }
 
@@ -1186,23 +1206,83 @@ impl TuiApp {
 
     fn execute_command_from_modal(&mut self, command: String) -> Result<(), ExecutionError> {
         self.modal = None;
-        self.start_worker("user", command.clone(), command, Vec::new())
+        self.start_worker(command.clone(), command, Vec::new())
     }
 
-    fn push_chat(&mut self, entry: ChatEntry) {
-        self.chat.push(entry);
-        if self.chat.len() > MAX_CHAT_ENTRIES {
-            let overflow = self.chat.len() - MAX_CHAT_ENTRIES;
-            self.chat.drain(0..overflow);
+    fn begin_turn(&mut self, label: &'static str, prompt: String, attachments: Vec<PathBuf>) {
+        self.turns.push(TurnEntry {
+            label,
+            prompt,
+            attachments,
+            events: Vec::new(),
+            response: None,
+            state: TurnState::Running,
+        });
+        if self.turns.len() > MAX_TURN_ENTRIES {
+            let overflow = self.turns.len() - MAX_TURN_ENTRIES;
+            self.turns.drain(0..overflow);
+        }
+        self.active_turn = self.turns.len().checked_sub(1);
+    }
+
+    fn append_active_turn_event(&mut self, entry: impl Into<String>) {
+        let Some(turn) = self.active_turn.and_then(|index| self.turns.get_mut(index)) else {
+            return;
+        };
+        turn.events.push(entry.into());
+        if turn.events.len() > MAX_TURN_EVENTS {
+            let overflow = turn.events.len() - MAX_TURN_EVENTS;
+            turn.events.drain(0..overflow);
         }
     }
 
-    fn push_activity(&mut self, entry: String) {
-        self.activity.push(entry);
-        if self.activity.len() > MAX_ACTIVITY_ENTRIES {
-            let overflow = self.activity.len() - MAX_ACTIVITY_ENTRIES;
-            self.activity.drain(0..overflow);
+    fn finish_active_turn(&mut self, content: String, kind: TurnResponseKind) {
+        if let Some(turn) = self.active_turn.and_then(|index| self.turns.get_mut(index)) {
+            turn.response = Some(TurnResponse { kind, content });
+            turn.state = if matches!(kind, TurnResponseKind::Error) {
+                TurnState::Failed
+            } else {
+                TurnState::Completed
+            };
+            self.active_turn = None;
+            return;
         }
+
+        self.push_system_turn(
+            content,
+            if matches!(kind, TurnResponseKind::Assistant) {
+                TurnResponseKind::Note
+            } else {
+                kind
+            },
+        );
+    }
+
+    fn push_system_turn(&mut self, content: String, kind: TurnResponseKind) {
+        self.turns.push(TurnEntry {
+            label: "System",
+            prompt: "Background action".to_string(),
+            attachments: Vec::new(),
+            events: Vec::new(),
+            response: Some(TurnResponse { kind, content }),
+            state: if matches!(kind, TurnResponseKind::Error) {
+                TurnState::Failed
+            } else {
+                TurnState::Completed
+            },
+        });
+        if self.turns.len() > MAX_TURN_ENTRIES {
+            let overflow = self.turns.len() - MAX_TURN_ENTRIES;
+            self.turns.drain(0..overflow);
+        }
+    }
+
+    fn latest_activity(&self) -> String {
+        self.turns
+            .iter()
+            .rev()
+            .find_map(|turn| turn.events.last().cloned())
+            .unwrap_or_else(|| self.status.clone())
     }
 
     fn start_provider_models_worker(
@@ -1216,7 +1296,6 @@ impl TuiApp {
         }
 
         self.status = format!("Loading {} models", provider.display_name());
-        self.push_activity(self.status.clone());
         self.busy = true;
 
         let (tx, rx) = mpsc::channel();
@@ -1257,7 +1336,6 @@ impl TuiApp {
         } else {
             "Waiting for Codex browser login".to_string()
         };
-        self.push_activity(self.status.clone());
         self.busy = true;
         self.modal = Some(ModalState::OpenAiCodexLogin {
             headless,
@@ -1308,7 +1386,6 @@ impl TuiApp {
         }
 
         self.status = format!("Saving {} configuration", provider.display_name());
-        self.push_activity(self.status.clone());
         self.busy = true;
 
         let (tx, rx) = mpsc::channel();
@@ -1332,18 +1409,14 @@ impl TuiApp {
 
     fn start_worker(
         &mut self,
-        role: &'static str,
-        transcript: String,
+        prompt: String,
         input: String,
         attachments: Vec<PathBuf>,
     ) -> Result<(), ExecutionError> {
-        self.push_chat(ChatEntry {
-            role,
-            content: transcript,
-        });
+        self.begin_turn("You", prompt, attachments.clone());
         self.scroll_results_to_bottom();
         self.status = "Running request".to_string();
-        self.push_activity("Request submitted".to_string());
+        self.append_active_turn_event("Request submitted");
         self.busy = true;
 
         let (tx, rx) = mpsc::channel();
@@ -1376,23 +1449,119 @@ fn spinner_frame(frame_tick: usize, busy: bool) -> &'static str {
     FRAMES[frame_tick % FRAMES.len()]
 }
 
-fn render_chat_entry(entry: &ChatEntry) -> Vec<Line<'static>> {
-    let (label, accent, body) = match entry.role {
-        "user" => ("You", Color::Cyan, Style::default().fg(Color::White)),
-        "assistant" => ("Result", Color::Green, Style::default().fg(Color::White)),
-        "error" => ("Error", Color::Red, Style::default().fg(Color::White)),
-        _ => ("Note", Color::Yellow, Style::default().fg(Color::White)),
+fn render_turn_entry(turn: &TurnEntry) -> Vec<Line<'static>> {
+    let prompt_accent = match turn.label {
+        "You" => Color::Cyan,
+        "System" => Color::Yellow,
+        _ => Color::Gray,
     };
-
+    let (state_label, state_color) = turn_state_badge(turn);
+    let attachment_count = turn.attachments.len();
+    let event_count = turn.events.len();
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            label,
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            turn.label,
+            Style::default()
+                .fg(prompt_accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            state_label,
+            Style::default()
+                .fg(state_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ─────────────────", Style::default().fg(Color::DarkGray)),
     ])];
 
-    for raw_line in entry.content.lines() {
+    lines.push(Line::from(vec![
+        Span::styled("attachments ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            attachment_count.to_string(),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::styled("  events ", Style::default().fg(Color::DarkGray)),
+        Span::styled(event_count.to_string(), Style::default().fg(Color::Gray)),
+    ]));
+
+    lines.extend(render_text_block(
+        &turn.prompt,
+        Style::default().fg(Color::White),
+        None,
+    ));
+
+    if !turn.attachments.is_empty() {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(vec![Span::styled(
+            "Context",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        lines.extend(turn.attachments.iter().map(|path| {
+            Line::from(vec![
+                Span::styled("• ", Style::default().fg(Color::Yellow)),
+                Span::styled(path.display().to_string(), Style::default().fg(Color::Gray)),
+            ])
+        }));
+    }
+
+    if !turn.events.is_empty() {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(vec![Span::styled(
+            "Activity",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        lines.extend(turn.events.iter().map(|event| {
+            Line::from(vec![
+                Span::styled("· ", Style::default().fg(Color::DarkGray)),
+                Span::styled(event.clone(), Style::default().fg(Color::Gray)),
+            ])
+        }));
+    }
+
+    if let Some(response) = &turn.response {
+        let (label, accent) = match response.kind {
+            TurnResponseKind::Assistant => ("Result", Color::Green),
+            TurnResponseKind::Error => ("Error", Color::Red),
+            TurnResponseKind::Note => ("Note", Color::Yellow),
+        };
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(vec![
+            Span::styled(
+                label,
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ─────────────────", Style::default().fg(Color::DarkGray)),
+        ]));
+        lines.extend(render_text_block(
+            &response.content,
+            Style::default().fg(Color::White),
+            Some(accent),
+        ));
+    } else if turn.state == TurnState::Running {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(vec![
+            Span::styled("Working", Style::default().fg(Color::Cyan)),
+            Span::styled(" ─────────────────", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    lines.push(Line::from(vec![Span::styled(
+        "────────────────────────────────────────────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    )]));
+
+    lines
+}
+
+fn render_text_block(content: &str, body: Style, accent: Option<Color>) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    for raw_line in content.lines() {
         let trimmed = raw_line.trim();
 
         if trimmed.is_empty() {
@@ -1400,7 +1569,7 @@ fn render_chat_entry(entry: &ChatEntry) -> Vec<Line<'static>> {
             continue;
         }
 
-        if let Some((key, value)) = trimmed.split_once(": ") {
+        if let (Some(accent), Some((key, value))) = (accent, trimmed.split_once(": ")) {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{key}: "),
@@ -1413,7 +1582,7 @@ fn render_chat_entry(entry: &ChatEntry) -> Vec<Line<'static>> {
 
         if let Some(item) = trimmed.strip_prefix("- ") {
             lines.push(Line::from(vec![
-                Span::styled("• ", Style::default().fg(accent)),
+                Span::styled("• ", Style::default().fg(accent.unwrap_or(Color::DarkGray))),
                 Span::styled(item.to_string(), body),
             ]));
             continue;
@@ -1423,6 +1592,84 @@ fn render_chat_entry(entry: &ChatEntry) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn approximate_turn_height(turn: &TurnEntry, width: usize) -> usize {
+    let mut total = 2;
+    total += approximate_text_height(&turn.prompt, width);
+
+    if !turn.attachments.is_empty() {
+        total += 2 + turn.attachments.len();
+    }
+
+    if !turn.events.is_empty() {
+        total += 2;
+        total += turn
+            .events
+            .iter()
+            .map(|event| approximate_line_height(event, width))
+            .sum::<usize>();
+    }
+
+    if let Some(response) = &turn.response {
+        total += 1;
+        total += 1;
+        total += approximate_text_height(&response.content, width);
+    } else if turn.state == TurnState::Running {
+        total += 2;
+    }
+
+    total + 2
+}
+
+fn turn_state_badge(turn: &TurnEntry) -> (&'static str, Color) {
+    match turn.state {
+        TurnState::Running => ("running", Color::Cyan),
+        TurnState::Completed => ("complete", Color::Green),
+        TurnState::Failed => ("failed", Color::Red),
+    }
+}
+
+fn approximate_text_height(content: &str, width: usize) -> usize {
+    content
+        .lines()
+        .map(|line| approximate_line_height(line, width))
+        .sum::<usize>()
+        .max(1)
+}
+
+fn approximate_line_height(line: &str, width: usize) -> usize {
+    line.chars().count().max(1).div_ceil(width.max(1))
+}
+
+fn summarize_paths(paths: &[PathBuf], selected: Option<usize>) -> String {
+    if paths.is_empty() {
+        return "none".to_string();
+    }
+
+    let mut labels = paths
+        .iter()
+        .enumerate()
+        .take(3)
+        .map(|(index, path)| {
+            let label = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| path.display().to_string());
+            if selected.is_some_and(|selected| selected == index) {
+                format!(">{label}")
+            } else {
+                label
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if paths.len() > 3 {
+        labels.push(format!("+{} more", paths.len() - 3));
+    }
+
+    labels.join("  ")
 }
 
 fn collect_entries(root: &Path, current: &Path) -> Result<Vec<FileEntry>, ExecutionError> {
@@ -1498,6 +1745,33 @@ fn attached_modal_area(composer_area: Rect, frame_area: Rect) -> Rect {
     }
 }
 
+fn panel_block<'a>(title: &'a str, active: bool) -> Block<'a> {
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(if active {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        })
+        .style(Style::default().bg(Color::Black))
+}
+
+fn status_style(status: &str, busy: bool) -> Style {
+    if busy {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if status == "Failed" {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
 fn modal_block<'a>(title: &'a str, help: &'a str) -> Block<'a> {
     Block::default()
         .title(title)
@@ -1550,10 +1824,66 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
+fn current_provider_summary() -> (String, String) {
+    ProviderKind::all()
+        .into_iter()
+        .find_map(|provider| {
+            ProviderStatus::current(provider)
+                .ok()
+                .filter(|status| status.is_default)
+                .map(|status| {
+                    (
+                        status.config.provider.display_name().to_string(),
+                        status.config.model,
+                    )
+                })
+        })
+        .unwrap_or_else(|| {
+            let fallback = ProviderConfig::resolve(ProviderKind::OpenAi).ok();
+            (
+                fallback
+                    .as_ref()
+                    .map(|config| config.provider.display_name().to_string())
+                    .unwrap_or_else(|| "OpenAI".to_string()),
+                fallback
+                    .map(|config| config.model)
+                    .unwrap_or_else(|| ProviderKind::OpenAi.default_model().to_string()),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{active_attachment_query, replace_active_attachment_query};
-    use std::path::Path;
+    use super::{
+        active_attachment_query, replace_active_attachment_query, TuiApp, TurnResponseKind,
+    };
+    use ratatui::layout::Rect;
+    use std::path::{Path, PathBuf};
+
+    fn test_app() -> TuiApp {
+        TuiApp {
+            cwd: PathBuf::from("."),
+            files: Vec::new(),
+            file_index: 0,
+            input: String::new(),
+            attachments: Vec::new(),
+            turns: Vec::new(),
+            active_turn: None,
+            status: "Idle".to_string(),
+            suggestions: Vec::new(),
+            suggestion_index: 0,
+            results_scroll: 0,
+            sidebar_selected: false,
+            worker: None,
+            busy: false,
+            should_quit: false,
+            frame_tick: 0,
+            results_area: Rect::default(),
+            composer_area: Rect::default(),
+            modal: None,
+            codex_available: false,
+        }
+    }
 
     #[test]
     fn detects_attachment_query_from_current_token() {
@@ -1569,5 +1899,43 @@ mod tests {
         let mut input = "compare @src/ma".to_string();
         replace_active_attachment_query(&mut input, Path::new("src/main.rs"));
         assert_eq!(input, "compare @src/main.rs ");
+    }
+
+    #[test]
+    fn app_events_attach_to_active_turn() {
+        let mut app = test_app();
+
+        app.begin_turn("You", "compare the datasets".to_string(), Vec::new());
+        app.append_active_turn_event("Planning started");
+        app.finish_active_turn(
+            "Finished comparison".to_string(),
+            TurnResponseKind::Assistant,
+        );
+
+        assert_eq!(app.turns.len(), 1);
+        assert_eq!(app.turns[0].events, vec!["Planning started"]);
+        assert_eq!(
+            app.turns[0].response.as_ref().unwrap().content,
+            "Finished comparison"
+        );
+        assert!(app.active_turn.is_none());
+    }
+
+    #[test]
+    fn background_completion_becomes_system_note_turn() {
+        let mut app = test_app();
+
+        app.finish_active_turn("Provider ready".to_string(), TurnResponseKind::Assistant);
+
+        assert_eq!(app.turns.len(), 1);
+        assert_eq!(app.turns[0].label, "System");
+        assert_eq!(
+            app.turns[0].response.as_ref().unwrap().content,
+            "Provider ready"
+        );
+        assert!(matches!(
+            app.turns[0].response.as_ref().unwrap().kind,
+            TurnResponseKind::Note
+        ));
     }
 }

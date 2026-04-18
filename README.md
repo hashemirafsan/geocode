@@ -1,297 +1,340 @@
 # GeoCode
 
-GeoCode is a local-first, CLI-first geospatial analysis tool for NetCDF and GeoTIFF datasets.
+GeoCode is local-first geospatial analysis CLI and TUI for NetCDF and GeoTIFF datasets.
 
-Current focus:
-- deterministic command execution
-- explicit CLI workflows
-- machine-readable JSON output
-- minimal session foundation
+## Public Status
 
-## Architecture Diagram
+Current public contract:
 
-```text
-+---------------------------------------------------------------+
-|                           USER INPUT                          |
-|  Direct commands: inspect | mean | compare | provider | session |
-|  Agent command: ask                                             |
-+---------------------------------------------------------------+
-                               |
-                               v
-+---------------------------------------------------------------+
-|                      REQUEST ORCHESTRATION                     |
-|  - Direct commands build typed plans                           |
-|  - Agent requests go to a planner model                        |
-|  - Planner returns a structured plan, not executable code      |
-+---------------------------------------------------------------+
-                               |
-                               v
-+---------------------------------------------------------------+
-|                           TYPED PLAN                           |
-|  - Goal                                                        |
-|  - Ordered capability steps                                    |
-|  - Typed references to intermediate values                     |
-+---------------------------------------------------------------+
-                               |
-                               v
-+---------------------------------------------------------------+
-|                 CAPABILITY REGISTRY + POLICY GATE              |
-|  Capability registry:                                          |
-|  - Exposes planner-safe semantic operations                    |
-|  - Chooses from discovered runtime support                     |
-|                                                                |
-|  Policy gate:                                                  |
-|  - Allows curated local operations only                        |
-|  - Rejects arbitrary shell and arbitrary network access        |
-+---------------------------------------------------------------+
-                               |
-                               v
-+---------------------------------------------------------------+
-|                    DETERMINISTIC RUST EXECUTOR                 |
-|  - Validates each step                                         |
-|  - Executes capabilities in Rust                               |
-|  - Stores typed intermediate values                            |
-|  - Produces traceable results                                  |
-+---------------------------------------------------------------+
-                               |
-                               v
-+---------------------------------------------------------------+
-|                     WORKFLOW + BINDING LAYERS                  |
-|  Workflow orchestration:                                       |
-|  - current inspect / mean / compare flows                      |
-|                                                                |
-|  Backend-family bindings:                                      |
-|  - dataset validation and dataset kind detection               |
-|  - NetCDF crate-backed access                                  |
-|  - GDAL crate-backed access                                    |
-|  - curated known-binary fallback where needed                  |
-+---------------------------------------------------------------+
-                               |
-                               v
-+---------------------------------------------------------------+
-|                          HOST RUNTIME                          |
-|  - Discovers machine support at startup                        |
-|  - Knows approved binaries and host capabilities               |
-|  - Current examples: gdalinfo, ncdump, ncgen                   |
-+---------------------------------------------------------------+
+- CLI is supported compatibility contract
+- TUI ships, but is secondary contract
+- canonical releases come from GitHub Releases
+- official package-manager channels are Homebrew, Scoop, and winget
+- `geocode self-update` supports standalone GitHub release installs only
 
-+---------------------------------------------------------------+
-|                       SESSION + MEMORY                         |
-|  Session state: workspace, aliases, current goal, prior results|
-|  Memory scaffolding: turn, session, persistent user/config     |
-+---------------------------------------------------------------+
+Locked policy/docs:
 
-+---------------------------------------------------------------+
-|                           OUTPUTS                              |
-|  - Human-readable text                                         |
-|  - Machine-readable JSON                                       |
-+---------------------------------------------------------------+
-```
+- `PUBLIC_RELEASE_POLICY.md`
+- `PUBLIC_CLI_CONTRACT.md`
+- `NATIVE_DEPENDENCY_STRATEGY.md`
+- `HOMEBREW_DISTRIBUTION.md`
+- `SCOOP_DISTRIBUTION.md`
+- `WINGET_DISTRIBUTION.md`
+- `SELF_UPDATE.md`
+- `DIAGNOSTICS.md`
+- `RELEASE_VALIDATION.md`
+- `PUBLIC_LAUNCH_READINESS.md`
 
-### Layer Summary
-- Request entry: direct CLI commands and agent requests both end up as typed plans.
-- Planner role: the LLM may choose steps, but it never executes geospatial work itself.
-- Capability layer: planner-visible operations are semantic and typed, not raw shell commands.
-- Policy layer: the runtime decides what host access is allowed before any step runs.
-- Executor layer: Rust executes plans deterministically and stores typed intermediate values.
-- Binding layer: real work is backed by NetCDF, GDAL, filesystem checks, and curated process fallbacks.
-- Runtime layer: machine discovery determines which backends are actually available.
-- State layer: session and memory keep continuity without turning execution into hidden autonomy.
-- Output layer: every result can be rendered for humans or emitted as JSON for automation.
+## Install
 
-## Provider Auth Strategy
-Current provider implementation:
-- OpenAI is API key based
-- expected env var: `OPENAI_API_KEY`
-- CLI-based key storage is also supported
+Official install priority:
 
-Planned provider architecture:
-- provider abstraction must support both API key and OAuth-based providers
-- GeoCode should only promise OAuth where the target provider exposes a product-safe OAuth flow
-- OpenAI should be treated as API-key first in the current product shape
+1. GitHub Releases
+2. Homebrew
+3. winget
+4. Scoop
 
-This distinction is important:
-- provider abstraction supports OAuth-capable providers later
-- current OpenAI support is not an OAuth flow
+### GitHub Releases
 
-### Set API Key From CLI
-Recommended:
+Download release asset for your platform from GitHub Releases.
+
+Supported first-release assets:
+
+- `geocode-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+- `geocode-vX.Y.Z-x86_64-apple-darwin.tar.gz`
+- `geocode-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+- `geocode-vX.Y.Z-x86_64-pc-windows-msvc.zip`
+
+Standalone release artifacts are only install path supported by `geocode self-update`.
+
+### Homebrew
 
 ```bash
-printf '%s' "$OPENAI_API_KEY" | geocode provider set-api-key openai --stdin
+brew tap geocode-cli/tap
+brew install geocode
 ```
 
-Also supported:
+Upgrade:
 
 ```bash
-geocode provider set-api-key openai --api-key "sk-..."
+brew update
+brew upgrade geocode
+```
+
+Uninstall:
+
+```bash
+brew uninstall geocode
+```
+
+### winget
+
+```powershell
+winget install GeoCode.GeoCode
+```
+
+Upgrade:
+
+```powershell
+winget upgrade GeoCode.GeoCode
+```
+
+Uninstall:
+
+```powershell
+winget uninstall GeoCode.GeoCode
+```
+
+### Scoop
+
+```powershell
+scoop bucket add geocode https://github.com/geocode-cli/scoop-bucket
+scoop install geocode
+```
+
+Upgrade:
+
+```powershell
+scoop update geocode
+```
+
+Uninstall:
+
+```powershell
+scoop uninstall geocode
+```
+
+### Developer Path
+
+`cargo install --git` is contributor/developer path only. Not recommended public install path.
+
+## Support Matrix
+
+| OS | Architecture | Target triple | Support |
+| --- | --- | --- | --- |
+| macOS | Apple Silicon | `aarch64-apple-darwin` | Tier 1 |
+| macOS | Intel | `x86_64-apple-darwin` | Tier 1 |
+| Windows | x86_64 | `x86_64-pc-windows-msvc` | Tier 1 |
+| Linux | x86_64 glibc baseline | `x86_64-unknown-linux-gnu` | Tier 1 with baseline limits |
+
+Linux notes:
+
+- support limited to glibc baseline environment
+- non-glibc Linux distributions are out of scope for first public release
+
+## Commands
+
+Supported public CLI commands:
+
+```bash
+geocode inspect <file>
+geocode mean <file> --var <name>
+geocode compare <file-a> <file-b> --var <name>
+geocode ask [--file <path> ...] <query>
+geocode version
+geocode doctor
+geocode self-update
 ```
 
 Notes:
-- `--stdin` is safer than passing the key directly on the command line
-- stored provider config is written outside the repo under `~/.config/geocode/openai.json`
-- `OPENAI_API_KEY` still overrides stored config when set
 
-## Status
-Implemented core `v0.1` commands:
-- `inspect`
-- `mean`
-- `compare`
+- `inspect` supports NetCDF and GeoTIFF
+- `mean` requires `--var` for NetCDF
+- `compare` requires same dataset type and `--var` for NetCDF
+- `ask` is planner-backed and may require provider configuration
+- `doctor` exposes support/runtime diagnostics
+- `self-update` is for standalone GitHub release installs only
 
-Supported formats:
-- NetCDF (`.nc`)
-- GeoTIFF (`.tif`, `.tiff`)
+TUI:
 
-## Requirements
-Rust toolchain:
-- `cargo`
+- launch with `geocode`
+- included in public builds
+- secondary contract; CLI compatibility has priority
 
-External tools currently used by the implementation:
-- `ncdump`
-- `ncgen` for tests
-- `gdalinfo`
-- `gdal_translate` for tests
+## JSON Stability
 
-These are used pragmatically for `v0.1` behavior. The long-term architecture still allows replacing internals with fully in-process Rust readers later.
-
-## Build
-```bash
-cargo build
-```
-
-## Run
-```bash
-cargo run -- --help
-```
-
-## Commands
-### Inspect
-Inspect essential metadata for a local file.
-
-```bash
-geocode inspect path/to/file.nc
-geocode inspect path/to/file.tif
-geocode --json inspect path/to/file.nc
-```
-
-NetCDF inspect includes:
-- variable names
-- dimensions
-- shape
-- dtype where available
-
-GeoTIFF inspect includes:
-- raster size
-- band count
-- band dtype
-- nodata if available
-
-### Mean
-Compute a mean summary.
-
-```bash
-geocode mean path/to/file.nc --var depth
-geocode mean path/to/file.tif
-geocode --json mean path/to/file.nc --var depth
-```
-
-Rules:
-- NetCDF requires explicit `--var`
-- NetCDF mean is computed over the full selected variable
-- GeoTIFF mean is nodata-aware when nodata metadata exists
-- GeoTIFF mean currently supports single-band files only
-
-### Compare
-Compare scalar means between two files of the same type.
-
-```bash
-geocode compare base.nc scenario.nc --var depth
-geocode compare base.tif scenario.tif
-geocode --json compare base.nc scenario.nc --var depth
-```
-
-Rules:
-- same-type only
-- scalar-summary only
-- no alignment, reprojection, or resampling in `v0.1`
-- difference is always `mean_b - mean_a`
-
-### Provider Status
-Inspect the current provider configuration.
-
-```bash
-geocode provider list
-geocode provider status
-geocode --json provider status
-```
-
-Current behavior:
-- lists supported providers explicitly
-- reports provider name
-- reports auth method
-- reports configured state
-- reports model and base URL
-- reports config path and credential source
-
-## JSON Output
-All core commands support `--json`.
+Public commands support `--json`.
 
 Examples:
+
 ```bash
 geocode --json inspect sample.nc
-geocode --json mean sample.nc --var depth
-geocode --json compare base.tif scenario.tif
+geocode --json version
+geocode --json doctor
+geocode --json self-update
 ```
 
-JSON is available now, but the schema should be treated as early-stage until `v0.2`.
+JSON schema versioning is deferred in `v0.x`.
 
-## Errors
-GeoCode returns explicit CLI errors for cases such as:
-- missing files
-- unsupported file types
-- missing NetCDF `--var`
-- invalid NetCDF variables
-- mixed-type compare requests
-- unconfigured provider usage for `ask`
+Expectations:
 
-## Agent Entry
-Current agent entrypoint:
+- documented fields are treated as public contract
+- optional fields may be added
+- breaking JSON changes must be called out in release notes
+
+## Versioning
+
+GeoCode uses moderate SemVer during `v0.x`.
+
+Rules:
+
+- tags use `vMAJOR.MINOR.PATCH`
+- patch releases should not intentionally break documented CLI behavior
+- minor releases may include breaking changes when needed, but must be explicit in release notes
+
+## Upgrade Policy
+
+`geocode self-update`:
+
+- supported for standalone GitHub release installs
+- unsupported for Homebrew, Scoop, winget, and developer/source installs
+
+Package-manager upgrade commands:
+
+- Homebrew: `brew upgrade geocode`
+- Scoop: `scoop update geocode`
+- winget: `winget upgrade GeoCode.GeoCode`
+
+## Native Runtime Policy
+
+Official release artifacts aim to work without manual GDAL or NetCDF installation.
+
+First-release runtime model:
+
+- bundled native runtime beside executable
+- bundled helper binaries including `gdalinfo` and `ncdump`
+- packaged installs should prefer bundled runtime over ambient machine state
+
+Source builds still may require native geospatial dependencies on machine.
+
+## Paths And Storage
+
+### App Paths
+
+macOS:
+
+- config/state: `~/Library/Application Support/geocode`
+- cache: `~/Library/Caches/geocode`
+
+Linux:
+
+- config: `~/.config/geocode` or `XDG_CONFIG_HOME/geocode`
+- cache: `~/.cache/geocode` or `XDG_CACHE_HOME/geocode`
+- state: `~/.local/state/geocode` or `XDG_STATE_HOME/geocode`
+
+Windows:
+
+- config: `%APPDATA%/geocode`
+- cache: `%LOCALAPPDATA%/geocode/cache`
+- state: `%LOCALAPPDATA%/geocode/state`
+
+### Current Stored Files
+
+- provider configs: platform config dir under `providers/`
+- default provider: platform config dir `default-provider.json`
+- memory store: platform state dir `memory.json`
+- session store: platform state dir `session.json`
+- Codex auth/model cache: existing `.codex` home-based path
+
+### Provider/Auth Setup
+
+Current OpenAI path:
 
 ```bash
-geocode ask "show all variables in base.nc"
-geocode ask --file base.nc "show all variables in this file"
-geocode ask --file base.nc --file scenario.nc "compare these datasets"
+export OPENAI_API_KEY="sk-..."
+geocode ask "inspect sample.nc"
 ```
 
-Current behavior:
-- `ask` supports explicit file selection via repeatable `--file`
-- if `OPENAI_API_KEY` is missing, GeoCode fails cleanly with setup guidance
-- a stored CLI-configured key also enables `ask`
-- if configured, GeoCode attempts a planner-only OpenAI request and returns a structured plan
-- execution still remains outside the LLM
+`OPENAI_API_KEY` overrides stored provider config when set.
 
-## Tests
-Run the full test suite:
+## Diagnostics
+
+Use:
 
 ```bash
+geocode doctor
+geocode --json doctor
+```
+
+`doctor` exposes:
+
+- executable path
+- target triple
+- detected install source
+- self-update eligibility
+- config/cache/state paths
+- helper binary availability
+- provider configured state summary
+
+## Troubleshooting
+
+### Native Runtime Issues
+
+If command fails due to runtime dependency issue:
+
+1. run `geocode doctor`
+2. confirm expected helper binaries are available
+3. confirm install method matches supported channel
+4. prefer official packaged install over source build for end-user machines
+
+### macOS
+
+- use matching Intel vs Apple Silicon build
+- if install came from Homebrew, use `brew upgrade geocode` not `self-update`
+- if artifact came from GitHub Releases, prefer fresh unpack over moving internal runtime files manually
+
+### Windows
+
+- use official `x86_64-pc-windows-msvc` artifact
+- if install came from Scoop or winget, use package-manager upgrade command
+- run `geocode doctor` to confirm runtime helper discovery and install source
+
+### Linux
+
+- use supported glibc baseline environment only
+- unsupported libc or distro combinations may fail outside support contract
+- prefer official packaged artifact over ad hoc source build for end-user use
+
+### Release Notes
+
+Read release notes for:
+
+- breaking CLI changes
+- JSON behavior changes
+- install/upgrade flow changes
+- runtime support limitations
+
+## Build From Source
+
+```bash
+cargo build
 cargo test
 ```
 
-Current test coverage includes:
-- inspect for NetCDF and GeoTIFF
-- mean for NetCDF and GeoTIFF
-- compare for NetCDF and GeoTIFF
-- failure-path checks for invalid inputs
+Current source builds may require GDAL/NetCDF runtime and development pieces on machine.
+
+## Launch Readiness
+
+Launch/support docs:
+
+- `RELEASE_VALIDATION.md`
+- `RELEASE_PROCESS.md`
+- `DIAGNOSTICS.md`
 
 ## Project Docs
-The longer architecture, business plan, and ticket backlog live in:
 
 ```text
-geocode_architecture_plan.md
+PUBLIC_RELEASE_PLAN.md
+PUBLIC_RELEASE_POLICY.md
+PHASE1_AUDIT.md
+NATIVE_DEPENDENCY_STRATEGY.md
+PUBLIC_CLI_CONTRACT.md
+HOMEBREW_DISTRIBUTION.md
+SCOOP_DISTRIBUTION.md
+WINGET_DISTRIBUTION.md
+SELF_UPDATE.md
+DIAGNOSTICS.md
+RELEASE_VALIDATION.md
+RELEASE_PROCESS.md
+PUBLIC_LAUNCH_READINESS.md
 ```
-
-## Near-Term Next Steps
-- session inspection commands
-- README/examples refinement
-- output normalization for golden files
-- eventual replacement of shell-tool-backed internals where it makes sense

@@ -9,43 +9,251 @@ use serde::Serialize;
 use crate::{
     agent,
     auth::{
-        CodexLoginMode, CredentialRef, CredentialStore, FileCredentialStore, TokenSet,
         codex_is_available, codex_login_status, login_openai_oauth, run_codex_login,
+        CodexLoginMode, CredentialRef, CredentialStore, FileCredentialStore, TokenSet,
     },
     capability::CapabilityRegistry,
     cli,
     engine::{DatasetKind, ExecutionError, ExecutionResult},
     executor::{PlanExecutor, RuntimeValue},
     memory::MemoryStore,
-    output::{OutputFormat, render, render_for_tui},
+    output::{render, render_for_tui, OutputFormat},
     plan::{CapabilityInput, ExecutionPlan, PlanStep, PlanValueRef},
     policy::ExecutionPolicy,
     provider::{
-        AuthMethod, OpenAiAuthSource, ProviderConfig, ProviderKind, ProviderStatus, ProviderStore,
-        StoredProviderConfig, fetch_models, supported_providers,
+        fetch_models, supported_providers, AuthMethod, OpenAiAuthSource, ProviderConfig,
+        ProviderKind, ProviderStatus, ProviderStore, StoredProviderConfig,
     },
     session::{CachedResultSummary, RecentTurn, SessionState, SessionStore},
     tools,
+    update::{self, ApplyMode, SelfUpdateResult},
 };
 
 pub fn run(cli: cli::Cli) -> Result<(), ExecutionError> {
+    if cli.version {
+        println!(
+            "{}",
+            render(&version_response(), OutputFormat::from_json_flag(cli.json))?
+        );
+        return Ok(());
+    }
+
     match cli.command {
         None => crate::tui::run(),
-        Some(cli::Command::Cli(args)) => {
-            println!("{}", execute_cli(args)?);
+        Some(command) => {
+            println!("{}", execute_cli(cli.json, command)?);
             Ok(())
         }
     }
 }
 
-pub fn execute_cli(args: cli::CliArgs) -> Result<String, ExecutionError> {
-    let format = OutputFormat::from_json_flag(args.json);
+pub fn execute_cli(json: bool, command: cli::Command) -> Result<String, ExecutionError> {
+    let format = OutputFormat::from_json_flag(json);
+    let response = execute_public_command(command)?;
 
-    match args.command {
-        cli::CliCommand::Ask(ask_args) => {
-            let response = execute_ask_command(ask_args, &mut |_| {})?;
-            render(&response, format)
+    render(&response, format)
+}
+
+fn execute_public_command(command: cli::Command) -> Result<CommandResponse, ExecutionError> {
+    match command {
+        cli::Command::Inspect(args) => execute_inspect_command(args),
+        cli::Command::Mean(args) => execute_mean_command(args),
+        cli::Command::Compare(args) => execute_compare_command(args),
+        cli::Command::Ask(args) => execute_ask_command(args, &mut |_| {}),
+        cli::Command::Doctor => execute_doctor_command(),
+        cli::Command::SelfUpdate => execute_self_update_command(),
+        cli::Command::Version => Ok(version_response()),
+        cli::Command::Cli(args) => match args.command {
+            cli::LegacyCliCommand::Ask(ask_args) => execute_ask_command(ask_args, &mut |_| {}),
+        },
+    }
+}
+
+fn execute_doctor_command() -> Result<CommandResponse, ExecutionError> {
+    let current_exe = std::env::current_exe().map_err(|err| ExecutionError::Io(err.to_string()))?;
+    let host = crate::runtime::HostDiscovery::discover();
+    let paths = crate::paths::GeocodePaths::detect();
+    let provider_store = ProviderStore::new();
+    let session_store = SessionStore::new();
+    let memory_store = MemoryStore::new();
+    let install_source = update::detect_install_source()?;
+    let update_eligible = matches!(install_source, update::InstallSource::Standalone);
+
+    let provider_statuses = supported_providers()?
+        .into_iter()
+        .map(|provider| {
+            serde_json::json!({
+                "provider": provider.provider,
+                "configured": provider.configured,
+                "auth_method": provider.auth_method,
+                "default": provider.default,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(CommandResponse {
+        command: "doctor",
+        summary: "Collected local diagnostics for support.".to_string(),
+        dataset_kind: None,
+        details: serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "target": update::current_target_triple(),
+            "current_exe": current_exe,
+            "install_source": install_source.as_str(),
+            "update": {
+                "eligible": update_eligible,
+                "redirect_command": install_source.redirect_command(),
+                "release_repo": "geocode-cli/geocode",
+            },
+            "paths": {
+                "config_dir": paths.config_dir,
+                "cache_dir": paths.cache_dir,
+                "state_dir": paths.state_dir,
+                "provider_dir": provider_store.path(ProviderKind::OpenAi).parent().map(|p| p.to_path_buf()),
+                "default_provider_path": provider_store.default_provider_path(),
+                "memory_path": memory_store.path(),
+                "session_path": session_store.path(),
+            },
+            "runtime": {
+                "local_filesystem": host.local_filesystem,
+                "network_access": host.network_access,
+                "binaries": host.binaries,
+            },
+            "providers": provider_statuses,
+        }),
+    })
+}
+
+fn execute_self_update_command() -> Result<CommandResponse, ExecutionError> {
+    match update::run_self_update()? {
+        SelfUpdateResult::Redirect {
+            install_source,
+            command,
+        } => Ok(CommandResponse {
+            command: "self_update",
+            summary: format!(
+                "Self-update unavailable for {} installs. Use `{}` instead.",
+                install_source.as_str(),
+                command
+            ),
+            dataset_kind: None,
+            details: serde_json::json!({
+                "status": "redirect",
+                "install_source": install_source.as_str(),
+                "redirect_command": command,
+            }),
+        }),
+        SelfUpdateResult::UpToDate { version } => Ok(CommandResponse {
+            command: "self_update",
+            summary: format!("GeoCode {version} is already up to date."),
+            dataset_kind: None,
+            details: serde_json::json!({
+                "status": "up_to_date",
+                "version": version,
+            }),
+        }),
+        SelfUpdateResult::Updated {
+            from_version,
+            to_version,
+            target,
+            mode,
+        } => {
+            let summary = match mode {
+                ApplyMode::Replaced => format!(
+                    "Updated GeoCode from {from_version} to {to_version} for {target}. Restart if shell still holds old process state."
+                ),
+                ApplyMode::StagedWindows => format!(
+                    "Staged GeoCode update from {from_version} to {to_version} for {target}. Exit this process to let Windows replacement finish."
+                ),
+            };
+            Ok(CommandResponse {
+                command: "self_update",
+                summary,
+                dataset_kind: None,
+                details: serde_json::json!({
+                    "status": "updated",
+                    "from_version": from_version,
+                    "to_version": to_version,
+                    "target": target,
+                    "mode": match mode {
+                        ApplyMode::Replaced => "replaced",
+                        ApplyMode::StagedWindows => "staged_windows",
+                    },
+                }),
+            })
         }
+    }
+}
+
+fn execute_inspect_command(args: cli::InspectArgs) -> Result<CommandResponse, ExecutionError> {
+    let mut context = load_context()?;
+    let (response, persist_session) = handle_inspect(
+        args.file,
+        &context.registry,
+        &context.policy,
+        &mut context.session,
+    )?;
+
+    if persist_session {
+        context.session_store.save(&context.session)?;
+    }
+
+    Ok(response)
+}
+
+fn execute_mean_command(args: cli::MeanArgs) -> Result<CommandResponse, ExecutionError> {
+    let mut context = load_context()?;
+    let (response, persist_session) = handle_mean(
+        args.file,
+        args.var,
+        &context.registry,
+        &context.policy,
+        &mut context.session,
+    )?;
+
+    if persist_session {
+        context.session_store.save(&context.session)?;
+    }
+
+    Ok(response)
+}
+
+fn execute_compare_command(args: cli::CompareArgs) -> Result<CommandResponse, ExecutionError> {
+    let mut context = load_context()?;
+    let (response, persist_session) = handle_compare(
+        args.file_a,
+        args.file_b,
+        args.var,
+        &context.registry,
+        &context.policy,
+        &mut context.session,
+    )?;
+
+    if persist_session {
+        context.session_store.save(&context.session)?;
+    }
+
+    Ok(response)
+}
+
+fn version_response() -> CommandResponse {
+    CommandResponse {
+        command: "version",
+        summary: format!(
+            "GeoCode {}\nTarget: {}{}",
+            env!("CARGO_PKG_VERSION"),
+            update::current_target_triple(),
+            option_env!("GEOCODE_GIT_SHA")
+                .map(|sha| format!("\nCommit: {sha}"))
+                .unwrap_or_default()
+        ),
+        dataset_kind: None,
+        details: serde_json::json!({
+            "name": env!("CARGO_PKG_NAME"),
+            "version": env!("CARGO_PKG_VERSION"),
+            "target": update::current_target_triple(),
+            "commit": option_env!("GEOCODE_GIT_SHA"),
+        }),
     }
 }
 
@@ -573,6 +781,8 @@ fn execute_inspect(
     policy: &ExecutionPolicy,
     session: &mut SessionState,
 ) -> Result<CommandResponse, ExecutionError> {
+    crate::bindings::validate_local_file(&file)?;
+    tools::detect_dataset_kind(&file)?;
     persist_workspace(&file, session);
     let plan = build_inspect_plan(&file)?;
     let outcome = execute_plan(&plan, registry, policy, session, &mut |_| {})?;
@@ -620,6 +830,8 @@ fn execute_mean(
     policy: &ExecutionPolicy,
     session: &mut SessionState,
 ) -> Result<CommandResponse, ExecutionError> {
+    crate::bindings::validate_local_file(&file)?;
+    tools::detect_dataset_kind(&file)?;
     persist_workspace(&file, session);
     let plan = build_mean_plan(&file, var.clone())?;
     let outcome = execute_plan(&plan, registry, policy, session, &mut |_| {})?;
@@ -699,6 +911,8 @@ fn execute_compare(
     policy: &ExecutionPolicy,
     session: &mut SessionState,
 ) -> Result<CommandResponse, ExecutionError> {
+    crate::bindings::validate_local_file(&file_a)?;
+    crate::bindings::validate_local_file(&file_b)?;
     persist_workspace(&file_a, session);
     let plan = ExecutionPlan {
         goal: format!(

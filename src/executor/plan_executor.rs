@@ -5,9 +5,9 @@ use serde::Serialize;
 use crate::{
     array,
     bindings::{
-        ArrayValue, DatasetHandle, NetcdfDatasetHandle, NetcdfVariableRef, RasterDatasetHandle,
         describe_netcdf_variable, list_netcdf_dimensions, list_netcdf_variables,
-        open_netcdf_dataset, read_netcdf_variable,
+        open_netcdf_dataset, read_netcdf_variable, ArrayValue, DatasetHandle, NetcdfDatasetHandle,
+        NetcdfVariableRef, RasterDatasetHandle,
     },
     capability::CapabilityRegistry,
     engine::{DatasetKind, DatasetRef, ExecutionError, TraceEvent},

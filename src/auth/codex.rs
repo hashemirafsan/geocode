@@ -6,10 +6,10 @@ use std::{
     sync::mpsc,
 };
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::Deserialize;
 
-use crate::{auth::TokenSet, engine::ExecutionError, provider::OpenAiAuthSource};
+use crate::{auth::TokenSet, engine::ExecutionError, paths::home_dir, provider::OpenAiAuthSource};
 
 #[derive(Debug, Clone, Copy)]
 pub enum CodexLoginMode {
@@ -175,9 +175,7 @@ pub fn load_codex_tokens() -> Result<TokenSet, ExecutionError> {
 }
 
 pub fn load_codex_models() -> Result<Vec<String>, ExecutionError> {
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| ExecutionError::ProviderNotConfigured("HOME is not set".into()))?;
+    let home = home_dir();
     let path = home.join(".codex").join("models_cache.json");
     let content = fs::read_to_string(&path).map_err(|err| {
         ExecutionError::Provider(format!("failed to read Codex models cache: {err}"))
@@ -205,9 +203,7 @@ pub fn load_codex_models() -> Result<Vec<String>, ExecutionError> {
 }
 
 fn codex_auth_path() -> Result<PathBuf, ExecutionError> {
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| ExecutionError::ProviderNotConfigured("HOME is not set".into()))?;
+    let home = home_dir();
     Ok(home.join(".codex").join("auth.json"))
 }
 

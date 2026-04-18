@@ -3,7 +3,7 @@ use std::{env, fs, path::PathBuf};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::ExecutionError;
+use crate::{engine::ExecutionError, paths::GeocodePaths};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -378,20 +378,22 @@ pub struct StoredProviderConfig {
 
 pub struct ProviderStore {
     base_dir: PathBuf,
-    legacy_base_dir: PathBuf,
+    legacy_base_dirs: Vec<PathBuf>,
 }
 
 impl ProviderStore {
     pub fn new() -> Self {
-        let home_dir = env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
-        let base_dir = home_dir.join(".geocode");
-        let legacy_base_dir = home_dir.join(".config").join("geocode");
+        let paths = GeocodePaths::detect();
+        let home_dir = crate::paths::home_dir();
+        let base_dir = paths.config_dir.join("providers");
+        let legacy_base_dirs = vec![
+            home_dir.join(".geocode"),
+            home_dir.join(".config").join("geocode"),
+        ];
 
         Self {
             base_dir,
-            legacy_base_dir,
+            legacy_base_dirs,
         }
     }
 
@@ -404,8 +406,7 @@ impl ProviderStore {
         let path = if path.exists() {
             path
         } else {
-            let legacy_path = self.legacy_path(provider);
-            if legacy_path.exists() {
+            if let Some(legacy_path) = self.legacy_paths(provider).find(|path| path.exists()) {
                 legacy_path
             } else {
                 return Ok(None);
@@ -455,8 +456,10 @@ impl ProviderStore {
         self.base_dir.join(provider.config_filename())
     }
 
-    fn legacy_path(&self, provider: ProviderKind) -> PathBuf {
-        self.legacy_base_dir.join(provider.config_filename())
+    fn legacy_paths(&self, provider: ProviderKind) -> impl Iterator<Item = PathBuf> + '_ {
+        self.legacy_base_dirs
+            .iter()
+            .map(move |base_dir| base_dir.join(provider.config_filename()))
     }
 
     pub fn default_provider_path(&self) -> PathBuf {
@@ -469,8 +472,10 @@ impl ProviderStore {
         let path = if path.exists() {
             path
         } else {
-            let legacy_path = self.legacy_default_provider_path();
-            if legacy_path.exists() {
+            if let Some(legacy_path) = self
+                .legacy_default_provider_paths()
+                .find(|path| path.exists())
+            {
                 legacy_path
             } else {
                 return Ok(None);
@@ -511,8 +516,10 @@ impl ProviderStore {
         })
     }
 
-    fn legacy_default_provider_path(&self) -> PathBuf {
-        self.legacy_base_dir.join("default-provider.json")
+    fn legacy_default_provider_paths(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.legacy_base_dirs
+            .iter()
+            .map(|base_dir| base_dir.join("default-provider.json"))
     }
 }
 
@@ -523,13 +530,18 @@ struct DefaultProviderConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
     use super::{ProviderKind, ProviderStore};
 
     #[test]
     fn provider_store_uses_home_geocode_directory() {
         let store = ProviderStore::new();
         let path = store.path(ProviderKind::OpenAi);
-        assert!(path.to_string_lossy().contains(".geocode/openai.json"));
+        assert!(path.to_string_lossy().contains("geocode"));
+        assert!(path.to_string_lossy().ends_with("providers/openai.json"));
     }
 
     #[test]
@@ -539,5 +551,25 @@ mod tests {
             .map(ProviderKind::command_name)
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["openai", "lmstudio", "z.ai"]);
+    }
+
+    #[test]
+    fn provider_store_loads_from_legacy_path_when_new_path_missing() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let legacy_dir = temp_dir.path().join("legacy");
+        fs::create_dir_all(&legacy_dir).expect("create legacy dir");
+        fs::write(legacy_dir.join("openai.json"), r#"{"api_key":"secret"}"#)
+            .expect("write legacy config");
+
+        let store = ProviderStore {
+            base_dir: temp_dir.path().join("config").join("providers"),
+            legacy_base_dirs: vec![legacy_dir],
+        };
+
+        let loaded = store.load(ProviderKind::OpenAi).expect("load config");
+        assert_eq!(
+            loaded.and_then(|config| config.api_key).as_deref(),
+            Some("secret")
+        );
     }
 }

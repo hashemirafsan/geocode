@@ -996,29 +996,23 @@ fn cap_with_planner_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::{CapabilityStatus, capability_catalog};
+    use super::{capability_catalog, CapabilityStatus};
 
     #[test]
     fn catalog_contains_broad_capability_surface() {
         let catalog = capability_catalog();
         assert!(catalog.capabilities.len() > 30);
-        assert!(
-            catalog
-                .capabilities
-                .iter()
-                .any(|cap| cap.id == "netcdf.variable.load")
-        );
-        assert!(
-            catalog
-                .capabilities
-                .iter()
-                .any(|cap| cap.id == "raster.band.stats")
-        );
-        assert!(
-            catalog
-                .capabilities
-                .iter()
-                .any(|cap| cap.status == CapabilityStatus::Implemented)
-        );
+        assert!(catalog
+            .capabilities
+            .iter()
+            .any(|cap| cap.id == "netcdf.variable.load"));
+        assert!(catalog
+            .capabilities
+            .iter()
+            .any(|cap| cap.id == "raster.band.stats"));
+        assert!(catalog
+            .capabilities
+            .iter()
+            .any(|cap| cap.status == CapabilityStatus::Implemented));
     }
 }

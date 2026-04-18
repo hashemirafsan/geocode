@@ -5,7 +5,7 @@ mod storage;
 mod types;
 
 pub use codex::{
-    CodexLoginMode, codex_is_available, codex_login_status, load_codex_models, run_codex_login,
+    codex_is_available, codex_login_status, load_codex_models, run_codex_login, CodexLoginMode,
 };
 pub use oauth::login_openai_oauth;
 pub use service::AuthService;

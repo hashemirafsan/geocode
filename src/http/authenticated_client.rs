@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use reqwest::{
-    Method, StatusCode,
     blocking::{Client, Response},
+    Method, StatusCode,
 };
 
 use crate::{

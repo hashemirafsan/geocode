@@ -8,7 +8,11 @@ pub enum OutputFormat {
 
 impl OutputFormat {
     pub fn from_json_flag(json: bool) -> Self {
-        if json { Self::Json } else { Self::Text }
+        if json {
+            Self::Json
+        } else {
+            Self::Text
+        }
     }
 }
 
@@ -33,6 +37,7 @@ fn render_text(response: &CommandResponse) -> String {
         "mean" => render_mean(response),
         "compare" => render_compare(response),
         "ask" => render_ask(response),
+        "doctor" => render_doctor(response),
         "ask_result" => render_ask_result(response),
         "provider_list" => render_provider_list(response),
         "provider_status" => render_provider_status(response),
@@ -97,6 +102,54 @@ fn render_provider_set_api_key(response: &CommandResponse) -> String {
 
     format!(
         "Stored API key\nProvider: {provider}\nConfig Path: {path}\nConfigured: {configured}\nCredential Source: {source}"
+    )
+}
+
+fn render_doctor(response: &CommandResponse) -> String {
+    let install_source = response.details["install_source"]
+        .as_str()
+        .unwrap_or("unknown");
+    let target = response.details["target"]
+        .as_str()
+        .unwrap_or("unknown-target");
+    let current_exe = response.details["current_exe"]
+        .as_str()
+        .unwrap_or("<unknown>");
+    let config_dir = response.details["paths"]["config_dir"]
+        .as_str()
+        .unwrap_or("<unknown>");
+    let cache_dir = response.details["paths"]["cache_dir"]
+        .as_str()
+        .unwrap_or("<unknown>");
+    let state_dir = response.details["paths"]["state_dir"]
+        .as_str()
+        .unwrap_or("<unknown>");
+    let update_eligible = response.details["update"]["eligible"]
+        .as_bool()
+        .unwrap_or(false);
+    let redirect = response.details["update"]["redirect_command"]
+        .as_str()
+        .unwrap_or("-");
+    let binaries = response.details["runtime"]["binaries"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "- {}: available={} path={}",
+                        item["command"].as_str().unwrap_or("unknown"),
+                        item["available"].as_bool().unwrap_or(false),
+                        item["path"].as_str().unwrap_or("<missing>")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+
+    format!(
+        "Diagnostics\nTarget: {target}\nExecutable: {current_exe}\nInstall Source: {install_source}\nUpdate Eligible: {update_eligible}\nUpdate Redirect: {redirect}\nConfig Dir: {config_dir}\nCache Dir: {cache_dir}\nState Dir: {state_dir}\nKnown Binaries:\n{binaries}"
     )
 }
 

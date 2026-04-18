@@ -10,6 +10,7 @@ mod executor;
 mod http;
 mod memory;
 mod output;
+mod paths;
 mod plan;
 mod policy;
 mod provider;
@@ -17,6 +18,7 @@ mod runtime;
 mod session;
 mod tools;
 mod tui;
+mod update;
 
 use std::process::ExitCode;
 
