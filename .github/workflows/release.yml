@@ -66,7 +66,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          conda install -n geocode-release -y -c conda-forge gdal netcdf-c
+          conda install -n geocode-release -y -c conda-forge gdal libnetcdf
           $prefix = $env:CONDA_PREFIX
           "$prefix\Library\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "GDAL_HOME=$prefix\Library" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
