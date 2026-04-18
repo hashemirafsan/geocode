@@ -24,6 +24,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Conda (Windows)
+        if: runner.os == 'Windows'
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          activate-environment: geocode-ci
+          channels: conda-forge
+          channel-priority: strict
+
       - name: Install native dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
@@ -40,19 +49,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $attempts = 4
-          for ($attempt = 1; $attempt -le $attempts; $attempt++) {
-            choco install gdal netcdf -y --no-progress
-            if ($LASTEXITCODE -eq 0) {
-              break
-            }
-            if ($attempt -eq $attempts) {
-              throw "Chocolatey install failed after $attempts attempts"
-            }
-            Start-Sleep -Seconds (15 * $attempt)
-          }
-          "C:\Program Files\GDAL" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "C:\tools\netcdf\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          conda install -n geocode-ci -y -c conda-forge gdal netcdf-c
+          $prefix = $env:CONDA_PREFIX
+          "$prefix\Library\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "GDAL_HOME=$prefix\Library" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GDAL_LIB_DIR=$prefix\Library\lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GDAL_INCLUDE_DIR=$prefix\Library\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "NETCDF_DIR=$prefix\Library" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run tests
         env:
